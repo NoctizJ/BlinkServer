@@ -23,7 +23,6 @@ def _setup_temp_env():
     """Redirect the engine at a fresh temp dir with both switches on."""
     tmp = Path(tempfile.mkdtemp(prefix="blink_log_test_"))
     log_engine.LOGS_DIR = tmp
-    log_engine.LOG_FILE = tmp / "blink.log"
     log_engine.LOG_CONFIG_PATH = tmp / "log_config.json"
     log_engine.JOB_CONFIG_PATH = tmp / "job_config.json"
 
@@ -35,8 +34,10 @@ def _setup_temp_env():
     return tmp
 
 
-def _read_log():
-    return log_engine.LOG_FILE.read_text() if log_engine.LOG_FILE.exists() else ""
+def _read(log_type):
+    """Read the log file a given type routes to."""
+    path = log_engine._log_file_for(log_type)
+    return path.read_text() if path.exists() else ""
 
 
 def _types():
@@ -47,7 +48,7 @@ def test_default_type():
     """A None type falls back to the default type."""
     _setup_temp_env()
     assert log_engine.log(None, "hello default") is True
-    body = _read_log()
+    body = _read("default")
     assert "[DEFAULT]" in body
     assert "hello default" in body
     print("✅ test_default_type")
@@ -57,7 +58,7 @@ def test_typed_entry():
     """A provided type is written (upper-cased) in the header."""
     _setup_temp_env()
     assert log_engine.log("blink", "camera motion") is True
-    body = _read_log()
+    body = _read("blink")
     assert "[BLINK]" in body
     assert "camera motion" in body
     print("✅ test_typed_entry")
@@ -67,11 +68,29 @@ def test_pretty_format():
     """Entries carry separators and a bracketed timestamp + type header."""
     _setup_temp_env()
     log_engine.log("blink", "formatted?")
-    body = _read_log()
+    body = _read("blink")
     assert "=" * 80 in body        # outer separator
     assert "-" * 80 in body        # inner separator
     assert body.count("[") >= 2    # [timestamp] and [TYPE]
     print("✅ test_pretty_format")
+
+
+def test_routing_by_type():
+    """blink -> blink.log; every other type -> default.log."""
+    _setup_temp_env()
+    log_engine.log("blink", "blink message")
+    log_engine.log("garage", "garage message")   # non-blink -> default.log
+    log_engine.log(None, "default message")       # default -> default.log
+
+    blink = _read("blink")
+    default = _read("default")
+
+    assert "blink message" in blink
+    assert "blink message" not in default
+    assert "garage message" in default
+    assert "default message" in default
+    assert "garage message" not in blink
+    print("✅ test_routing_by_type")
 
 
 def test_auto_register_new_type():
@@ -88,7 +107,7 @@ def test_type_switch_off():
     _setup_temp_env()
     log_engine.set_type_status("blink", False)
     assert log_engine.log("blink", "should be suppressed") is False
-    assert "should be suppressed" not in _read_log()
+    assert "should be suppressed" not in _read("blink")
     print("✅ test_type_switch_off")
 
 
@@ -97,7 +116,7 @@ def test_master_switch_off():
     tmp = _setup_temp_env()
     (tmp / "job_config.json").write_text(json.dumps({"jobs": {"log": False}}))
     assert log_engine.log("default", "master off") is False
-    assert "master off" not in _read_log()
+    assert "master off" not in _read("default")
     print("✅ test_master_switch_off")
 
 
@@ -116,6 +135,7 @@ def main():
         test_default_type,
         test_typed_entry,
         test_pretty_format,
+        test_routing_by_type,
         test_auto_register_new_type,
         test_type_switch_off,
         test_master_switch_off,

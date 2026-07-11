@@ -7,7 +7,7 @@ server code.
 ## Features
 
 - Arm/disarm webhook endpoints backed by Home Assistant
-- Shared-secret authentication per webhook
+- Single shared-secret authentication for webhooks
 - Modular jobs — drop a new module in `jobs/` and register it in `config.json`
 - Enable/disable jobs at runtime via the API
 - Structured, searchable logging with master + per-type switches — see [Logging.md](Logging.md)
@@ -37,6 +37,22 @@ Fill in your values:
 ```
 
 > `home_assistant_config.json` holds a secret token and is gitignored — never commit it.
+
+Then set the shared webhook secret:
+
+```bash
+cp webhook_secret.example.json webhook_secret.json
+```
+
+Put a long, random string in it:
+
+```json
+{
+    "WEBHOOK_SECRET": "a-long-random-string"
+}
+```
+
+> `webhook_secret.json` is gitignored — never commit it.
 
 See [Home Assistant Setup.md](Home%20Assistant%20Setup.md) for how to run Home
 Assistant and generate a token.
@@ -92,7 +108,7 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
 
 ## Configuration
 
-**`config.json`** maps webhook paths to job modules and their secrets:
+**`config.json`** maps webhook paths to job modules:
 
 ```json
 {
@@ -100,14 +116,23 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
         {
             "path": "/webhook/blink/arm",
             "module": "jobs.home_assistant_arm_disarm",
-            "secret": "your-shared-secret-here"
+            "require_secret": true
         }
     ]
 }
 ```
 
 - `module` — the job module that handles the request (must expose a `run(payload)` function)
-- `secret` — required in the `X-Webhook-Secret` header; use `null` to disable auth
+- `require_secret` — when `true`, the request must include the shared secret in the `X-Webhook-Secret` header; `false` disables auth for that webhook
+
+**`webhook_secret.json`** holds the single shared secret used by every
+authenticated webhook. It is gitignored — copy it from the example and fill it in:
+
+```json
+{
+    "WEBHOOK_SECRET": "a-long-random-string"
+}
+```
 
 **`job_config.json`** tracks which jobs are enabled. It is created automatically
 and updated through the `/jobs` endpoints — you rarely edit it by hand:
@@ -131,9 +156,10 @@ python3 app.py --debug                      # then hit endpoints with curl
 
 ## Security
 
-Every webhook with a `secret` requires that value in the `X-Webhook-Secret`
-header; requests without it get `401`. Use a strong, random secret in
-production, and prefer a private network (e.g. Tailscale) over public exposure.
+Webhooks with `"require_secret": true` require the shared secret (from
+`webhook_secret.json`) in the `X-Webhook-Secret` header; requests without it
+get `401`. Use a strong, random secret in production, and prefer a private
+network (e.g. Tailscale) over public exposure.
 
 ## License
 

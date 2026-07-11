@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 JOB_CONFIG_PATH = Path(__file__).parent / "job_config.json"
+WEBHOOK_SECRET_PATH = Path(__file__).parent / "webhook_secret.json"
 
 app = Flask(__name__)
 
@@ -48,6 +49,19 @@ app = Flask(__name__)
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def load_webhook_secret():
+    """Load the single shared webhook secret from webhook_secret.json.
+
+    The file is gitignored (see webhook_secret.example.json for the format).
+    Returns the secret string, or None if the file is missing/unreadable.
+    """
+    try:
+        with open(WEBHOOK_SECRET_PATH) as f:
+            return json.load(f).get("WEBHOOK_SECRET")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
 def load_job_config():
@@ -80,12 +94,19 @@ def get_job_enabled_status(job_name):
 def make_handler(hook):
     module_name = hook["module"]
     function_name = hook.get("function", "run")
-    secret = hook.get("secret")
+    require_secret = hook.get("require_secret", False)
 
     def handler():
-        if secret:
+        if require_secret:
+            expected = load_webhook_secret()
+            if not expected:
+                logger.error(
+                    "webhook %s requires a secret but none is configured "
+                    "(see webhook_secret.example.json)", hook.get("path")
+                )
+                return jsonify({"error": "server misconfigured: webhook secret not set"}), 500
             provided = request.headers.get("X-Webhook-Secret")
-            if provided != secret:
+            if provided != expected:
                 return jsonify({"error": "unauthorized"}), 401
 
         payload = request.get_json(silent=True) or {}

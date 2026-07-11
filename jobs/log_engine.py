@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Logging engine for Blink Server.
 
-Appends pretty, searchable, timestamped entries to ``logs/blink.log``.
+Appends pretty, searchable, timestamped entries to files under ``logs/``.
+Entries are routed by type: ``blink`` entries go to ``logs/blink.log`` and
+every other type goes to ``logs/default.log``.
 
 Every log has a *type* (an arbitrary string). If the type is ``None`` (or
 empty) the ``DEFAULT_TYPE`` is used instead. Whether a log is actually
@@ -18,8 +20,8 @@ default) so it can be toggled on/off later.
 Usage:
     from jobs.log_engine import log
 
-    log("blink", "Camera 1 detected motion")
-    log(None, "Something happened")      # -> uses the default type
+    log("blink", "Camera 1 detected motion")   # -> logs/blink.log
+    log(None, "Something happened")             # -> logs/default.log
 """
 
 import datetime
@@ -29,13 +31,15 @@ from pathlib import Path
 # The repo root is the parent of the jobs/ folder that holds this module.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
-LOG_FILE = LOGS_DIR / "blink.log"
 
 JOB_CONFIG_PATH = REPO_ROOT / "job_config.json"
 LOG_CONFIG_PATH = REPO_ROOT / "log_config.json"
 
 # Fallback type used when a caller passes None / an empty type.
 DEFAULT_TYPE = "default"
+
+# The "blink" type gets its own file; every other type shares default.log.
+BLINK_TYPE = "blink"
 
 # Key inside job_config.json["jobs"] that acts as the master log switch.
 MASTER_SWITCH = "log"
@@ -109,6 +113,17 @@ def _type_enabled(log_type):
     return types[log_type]
 
 
+def _log_file_for(log_type):
+    """Route a type to its log file.
+
+    ``blink`` entries go to ``logs/blink.log``; every other type is written to
+    ``logs/default.log``. Reads the current ``LOGS_DIR`` at call time so tests
+    can redirect it.
+    """
+    filename = "blink.log" if log_type == BLINK_TYPE else "default.log"
+    return LOGS_DIR / filename
+
+
 def _format_entry(log_type, text, timestamp):
     """Format a single, self-contained, searchable log entry.
 
@@ -131,7 +146,10 @@ def _format_entry(log_type, text, timestamp):
 
 
 def log(log_type, text):
-    """Append a timestamped, typed entry to ``logs/blink.log``.
+    """Append a timestamped, typed entry to its type's log file.
+
+    ``blink`` entries are written to ``logs/blink.log``; all other types go to
+    ``logs/default.log``.
 
     Args:
         log_type: The log type/category. May be ``None`` (or empty), in which
@@ -157,7 +175,7 @@ def log(log_type, text):
     entry = _format_entry(log_type, str(text), timestamp)
 
     LOGS_DIR.mkdir(exist_ok=True)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
+    with open(_log_file_for(log_type), "a", encoding="utf-8") as f:
         f.write(entry)
 
     return True
@@ -165,8 +183,7 @@ def log(log_type, text):
 
 if __name__ == "__main__":
     # Simple smoke test / demo.
-    print("Writing sample log entries to", LOG_FILE)
     print("default type ->", log(None, "This log used the default type."))
     print("blink type   ->", log("blink", "Camera 1 detected motion in the driveway."))
     print("multiline     ->", log("blink", "Line one of the message.\nLine two of the message."))
-    print("Done. Inspect the log with: cat", LOG_FILE)
+    print("Wrote to:", _log_file_for("blink"), "and", _log_file_for("default"))

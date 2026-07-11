@@ -58,3 +58,4 @@ desktop.ini
 # Local config (contains secrets — never commit)
 credentials.json
 home_assistant_config.json
+webhook_secret.json

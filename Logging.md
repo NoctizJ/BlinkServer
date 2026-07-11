@@ -1,13 +1,22 @@
 # Logging System
 
 A small logging engine (`jobs/log_engine.py`) that appends pretty, searchable,
-timestamped entries to `logs/blink.log`. Every entry has a *type*, and two
+timestamped entries to files under `logs/`. Every entry has a *type*, and two
 switches decide whether it is actually written.
+
+## Where entries go
+
+Entries are routed by type:
+
+| Type            | File                |
+| --------------- | ------------------- |
+| `blink`         | `logs/blink.log`    |
+| everything else | `logs/default.log`  |
 
 ## Log format
 
 Entries are separated by a rule, with the timestamp and type on one line so the
-file is easy to grep:
+files are easy to grep:
 
 ```
 ================================================================================
@@ -19,8 +28,8 @@ Camera 1 detected motion in the driveway.
 Search examples:
 
 ```bash
-grep "\[BLINK\]" logs/blink.log     # all entries of a type
-grep "motion" logs/blink.log        # by message text
+grep "\[BLINK\]" logs/blink.log       # all entries of a type
+grep "motion" logs/*.log              # by message text, across files
 ```
 
 > `logs/*.log` is gitignored — logs stay local.
