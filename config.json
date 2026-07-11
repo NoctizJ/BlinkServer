@@ -17,6 +17,12 @@
       "module": "jobs.log_webhook",
       "function": "run",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/upload",
+      "module": "jobs.file_upload",
+      "function": "run",
+      "require_secret": true
     }
   ]
 }

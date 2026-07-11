@@ -2,6 +2,7 @@
   "jobs": {
     "home_assistant_arm_disarm": true,
     "sample_job": true,
+    "file_upload": true,
     "log": true
   },
   "last_modified": "2026-07-11 10:02:45.994004"
