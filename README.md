@@ -1,79 +1,133 @@
-# Automation Webhook Server
+# Blink Server
 
-A generic Flask server for triggering automation jobs remotely via webhooks.
-`app.py` never needs to change — it just reads `config.json` and dynamically
-calls whatever job function you point it at.
+A Flask webhook server that arms/disarms an alarm panel through Home Assistant.
+Its job system is modular, so new automations can be added without touching the
+server code.
 
-## Structure
+## Features
 
-- `app.py` — generic server. Loads `config.json`, registers a POST route per
-  webhook entry, dynamically imports the configured module and calls its
-  `run(payload)` function.
-- `config.json` — declares webhooks: path, target module/function, optional
-  secret.
-- `jobs/sample_job.py` — example job. `run(payload)` logs the trigger and
-  payload and returns a JSON-serializable result.
-- `requirements.txt` — dependencies (just Flask).
+- Arm/disarm webhook endpoints backed by Home Assistant
+- Shared-secret authentication per webhook
+- Modular jobs — drop a new module in `jobs/` and register it in `config.json`
+- Enable/disable jobs at runtime via the API
 
-## Adding a new automation
+## Installation
 
-1. Create a new module under `jobs/` with a `run(payload)` function.
-2. Add an entry to `config.json`:
-   ```json
-   {
-     "path": "/webhook/my-job",
-     "module": "jobs.my_job",
-     "function": "run",
-     "secret": "optional-shared-secret"
-   }
-   ```
-3. Restart the server. No changes to `app.py` needed.
+```bash
+git clone <repo-url> && cd BlinkServer
+python3 -m venv venv && source venv/bin/activate
+python3 -m pip install -r requirements.txt
+```
+
+Then create your Home Assistant config:
+
+```bash
+cp home_assistant_config.example.json home_assistant_config.json
+```
+
+Fill in your values:
+
+```json
+{
+    "HA_BASE_URL": "http://localhost:8123",
+    "HA_API_KEY": "your_home_assistant_long_lived_access_token",
+    "HA_ENTITY_ID": "alarm_control_panel.blink_armstrong"
+}
+```
+
+> `home_assistant_config.json` holds a secret token and is gitignored — never commit it.
+
+See [Home Assistant Setup.md](Home%20Assistant%20Setup.md) for how to run Home
+Assistant and generate a token.
 
 ## Running
 
 ```bash
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-./venv/bin/python app.py
+source venv/bin/activate
+python3 app.py            # runs on port 5050
+python3 app.py --debug    # verbose logging
+
+PORT=8080 python3 app.py  # custom port
 ```
 
-Server listens on `0.0.0.0:5000` by default. Override with `PORT`:
+The server binds to `0.0.0.0`. To reach it from other devices without exposing
+ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
+
+## API
+
+| Method | Path                          | Description                     |
+| ------ | ----------------------------- | ------------------------------- |
+| POST   | `/webhook/blink/arm`          | Arm the alarm panel             |
+| POST   | `/webhook/blink/disarm`       | Disarm the alarm panel          |
+| GET    | `/jobs`                       | List jobs and their status      |
+| POST   | `/jobs/{job_name}/enable`     | Enable a job                    |
+| POST   | `/jobs/{job_name}/disable`    | Disable a job                   |
+| POST   | `/jobs/{job_name}/toggle`     | Toggle a job on/off             |
+| GET    | `/health`                     | Health check                    |
+
+Webhook requests must include the matching secret in the `X-Webhook-Secret`
+header (see [Security](#security)).
+
+### Examples
 
 ```bash
-PORT=5050 ./venv/bin/python app.py
-```
-
-> **macOS note:** port 5000 is often taken by AirPlay Receiver. Either use a
-> different `PORT`, or disable it in System Settings → General → AirDrop &
-> Handoff → AirPlay Receiver.
-
-## Usage
-
-```bash
-curl -X POST http://127.0.0.1:5050/webhook/sample \
+# Arm
+curl -X POST http://localhost:5050/webhook/blink/arm \
   -H "Content-Type: application/json" \
-  -d '{"hello": "world"}'
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"action": "arm"}'
+
+# Disarm
+curl -X POST http://localhost:5050/webhook/blink/disarm \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"action": "disarm"}'
 ```
 
-(replace `5050` with `5000` if you didn't override `PORT`)
+## Configuration
 
-Health check: `GET /health`
+**`config.json`** maps webhook paths to job modules and their secrets:
 
-## Auth
+```json
+{
+    "webhooks": [
+        {
+            "path": "/webhook/blink/arm",
+            "module": "jobs.home_assistant_arm_disarm",
+            "secret": "your-shared-secret-here"
+        }
+    ]
+}
+```
 
-If a webhook entry has a non-null `secret`, requests must include it in the
-`X-Webhook-Secret` header, or the server responds `401 Unauthorized`.
+- `module` — the job module that handles the request (must expose a `run(payload)` function)
+- `secret` — required in the `X-Webhook-Secret` header; use `null` to disable auth
 
-## Remote access
+**`job_config.json`** tracks which jobs are enabled. It is created automatically
+and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
-To reach this server from another device (phone, other machine) with a
-stable address, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
+```json
+{
+    "jobs": {
+        "home_assistant_arm_disarm": true
+    }
+}
+```
 
-## Status / open items
+## Testing
 
-- Verified via Flask's in-process test client (routing, dynamic job dispatch,
-  404 on unknown routes, secret-header auth). Not yet tested over a real
-  HTTP socket — do that first when you run it locally.
-- Remote access model (LAN/VPN vs. public internet) and job model (fixed
-  named jobs vs. arbitrary commands) are still undecided — current setup
-  assumes local network and named jobs only.
+```bash
+python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
+python3 test_job_management.py              # job enable/disable logic
+python3 app.py --debug                      # then hit endpoints with curl
+```
+
+## Security
+
+Every webhook with a `secret` requires that value in the `X-Webhook-Secret`
+header; requests without it get `401`. Use a strong, random secret in
+production, and prefer a private network (e.g. Tailscale) over public exposure.
+
+## License
+
+MIT
