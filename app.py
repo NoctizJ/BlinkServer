@@ -16,12 +16,13 @@ from functools import wraps
 from pathlib import Path
 import datetime
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 
 from jobs.log_engine import (
     load_log_config,
     get_type_enabled_status,
     set_type_status,
+    read_log,
     MASTER_SWITCH,
 )
 
@@ -315,6 +316,19 @@ def toggle_log_type(log_type):
     name = set_log_type_status(log_type, new_status)
     action = "enabled" if new_status else "disabled"
     return jsonify({"status": "ok", "message": f"Log type {name} {action}"})
+
+
+@app.route("/logs/<log_type>/read", methods=["GET", "POST"])
+@require_webhook_secret
+def read_log_type(log_type):
+    """Return recent log entries for a type as plain text (blink -> blink.log,
+    else default.log). Use ?n=<count> for the number of most recent entries
+    (default 20; n<=0 returns the whole file)."""
+    n = request.args.get("n", default=20, type=int)
+    text = read_log(log_type, entries=n)
+    if not text:
+        text = f"(no log entries for '{log_type}')\n"
+    return Response(text, mimetype="text/plain")
 
 
 config = load_config()

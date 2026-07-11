@@ -101,7 +101,7 @@ def run(payload):
             "bytes": dest.stat().st_size,
         })
 
-    write_log("default", f"Received {len(saved)} file(s): "
+    write_log("upload", f"Received {len(saved)} file(s): "
               + ", ".join(s["stored_as"] for s in saved))
 
     return {"status": "ok", "count": len(saved), "files": saved}

@@ -2,8 +2,8 @@
 """Logging engine for Blink Server.
 
 Appends pretty, searchable, timestamped entries to files under ``logs/``.
-Entries are routed by type: ``blink`` entries go to ``logs/blink.log`` and
-every other type goes to ``logs/default.log``.
+Entries are routed by type to their own file: ``blink`` -> ``logs/blink.log``,
+``upload`` -> ``logs/upload.log``, and every other type -> ``logs/default.log``.
 
 Every log has a *type* (an arbitrary string). If the type is ``None`` (or
 empty) the ``DEFAULT_TYPE`` is used instead. Whether a log is actually
@@ -21,6 +21,7 @@ Usage:
     from jobs.log_engine import log
 
     log("blink", "Camera 1 detected motion")   # -> logs/blink.log
+    log("upload", "Received 1 file")            # -> logs/upload.log
     log(None, "Something happened")             # -> logs/default.log
 """
 
@@ -38,8 +39,13 @@ LOG_CONFIG_PATH = REPO_ROOT / "log_config.json"
 # Fallback type used when a caller passes None / an empty type.
 DEFAULT_TYPE = "default"
 
-# The "blink" type gets its own file; every other type shares default.log.
+# Types that get their own log file; every other type shares default.log.
 BLINK_TYPE = "blink"
+UPLOAD_TYPE = "upload"
+TYPE_LOG_FILES = {
+    BLINK_TYPE: "blink.log",
+    UPLOAD_TYPE: "upload.log",
+}
 
 # Key inside job_config.json["jobs"] that acts as the master log switch.
 MASTER_SWITCH = "log"
@@ -116,12 +122,11 @@ def _type_enabled(log_type):
 def _log_file_for(log_type):
     """Route a type to its log file.
 
-    ``blink`` entries go to ``logs/blink.log``; every other type is written to
-    ``logs/default.log``. Reads the current ``LOGS_DIR`` at call time so tests
-    can redirect it.
+    ``blink`` -> ``logs/blink.log``, ``upload`` -> ``logs/upload.log``; every
+    other type -> ``logs/default.log``. Reads the current ``LOGS_DIR`` at call
+    time so tests can redirect it.
     """
-    filename = "blink.log" if log_type == BLINK_TYPE else "default.log"
-    return LOGS_DIR / filename
+    return LOGS_DIR / TYPE_LOG_FILES.get(log_type, "default.log")
 
 
 def _format_entry(log_type, text, timestamp):
@@ -179,6 +184,27 @@ def log(log_type, text):
         f.write(entry)
 
     return True
+
+
+def read_log(log_type, entries=None):
+    """Return the text of a type's log file.
+
+    Routing matches writes: ``blink`` reads ``logs/blink.log``; every other
+    type reads ``logs/default.log``. When ``entries`` is a positive int, only
+    the most recent ``entries`` entries are returned (an entry is one
+    separator-delimited block); ``None`` or ``<= 0`` returns the whole file.
+    Returns ``""`` if the file does not exist yet.
+    """
+    path = _log_file_for(_normalize_type(log_type))
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    if entries is None or entries <= 0:
+        return text
+    # Entries are delimited by the OUTER_SEP line; each entry begins with it.
+    marker = OUTER_SEP + "\n"
+    chunks = [c for c in text.split(marker) if c.strip()]
+    return "".join(marker + c for c in chunks[-entries:])
 
 
 if __name__ == "__main__":

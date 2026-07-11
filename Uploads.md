@@ -63,8 +63,8 @@ curl -X POST http://localhost:5050/webhook/upload \
 - Each file is renamed to `<timestamp>_<sanitized-original-name>` so uploads
   never overwrite each other. Filenames are sanitized with
   `werkzeug.utils.secure_filename`.
-- Every upload is recorded in the log under the `default` type — it goes to
-  `logs/default.log` (see [Logging.md](Logging.md)).
+- Every upload is recorded in the log under the `upload` type — it goes to
+  `logs/upload.log` (see [Logging.md](Logging.md)).
 
 ## Notes
 

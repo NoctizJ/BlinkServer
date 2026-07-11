@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import app
 import jobs.file_upload as file_upload
+from jobs import log_engine
 
 
 def _secret():
@@ -27,9 +28,15 @@ def _secret():
 
 
 def _fresh_files_dir():
-    tmp = Path(tempfile.mkdtemp(prefix="blink_upload_test_"))
-    file_upload.FILES_DIR = tmp
-    return tmp
+    """Point uploads at a fresh temp dir, and isolate the logging engine (in a
+    separate temp dir) so upload audit logs never touch the real logs/config."""
+    files_dir = Path(tempfile.mkdtemp(prefix="blink_upload_files_"))
+    logs_dir = Path(tempfile.mkdtemp(prefix="blink_upload_logs_"))
+    file_upload.FILES_DIR = files_dir
+    log_engine.LOGS_DIR = logs_dir
+    log_engine.LOG_CONFIG_PATH = logs_dir / "log_config.json"
+    log_engine.JOB_CONFIG_PATH = logs_dir / "job_config.json"
+    return files_dir
 
 
 def test_upload_saves_file():

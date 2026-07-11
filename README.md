@@ -84,6 +84,7 @@ ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
 | POST   | `/jobs/{job_name}/toggle`     | Toggle a job on/off 🔒              |
 | GET    | `/logs`                       | List log types and their status    |
+| GET    | `/logs/{type}/read`           | Read recent log entries as text 🔒  |
 | POST   | `/logs/{type}/enable`         | Enable a log type 🔒                |
 | POST   | `/logs/{type}/disable`        | Disable a log type 🔒               |
 | POST   | `/logs/{type}/toggle`         | Toggle a log type on/off 🔒         |
@@ -168,12 +169,13 @@ python3 app.py --debug                      # then hit endpoints with curl
 
 ## Security
 
-Webhooks with `"require_secret": true`, and every state-changing management
+Webhooks with `"require_secret": true`, every state-changing management
 endpoint (`/jobs/{name}/enable|disable|toggle` and
-`/logs/{type}/enable|disable|toggle`), require the shared secret (from
-`webhook_secret.json`) in the `X-Webhook-Secret` header; requests without it
-get `401`. Read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open.
-Use a strong, random secret in production, and prefer a private network
+`/logs/{type}/enable|disable|toggle`), and reading log contents
+(`/logs/{type}/read`) require the shared secret (from `webhook_secret.json`) in
+the `X-Webhook-Secret` header; requests without it get `401`. The remaining
+read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. Use a
+strong, random secret in production, and prefer a private network
 (e.g. Tailscale) over public exposure.
 
 ## License

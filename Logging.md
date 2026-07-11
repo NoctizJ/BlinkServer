@@ -6,11 +6,12 @@ switches decide whether it is actually written.
 
 ## Where entries go
 
-Entries are routed by type:
+Entries are routed by type, each type to its own file:
 
 | Type            | File                |
 | --------------- | ------------------- |
 | `blink`         | `logs/blink.log`    |
+| `upload`        | `logs/upload.log`   |
 | everything else | `logs/default.log`  |
 
 ## Log format
@@ -99,7 +100,8 @@ are logged, so you can toggle them off afterwards.
 {
   "types": {
     "default": true,
-    "blink": true
+    "blink": true,
+    "upload": true
   }
 }
 ```
@@ -127,6 +129,31 @@ Per-type switches:
 curl http://localhost:5050/logs
 curl -X POST http://localhost:5050/logs/blink/disable
 ```
+
+## Reading logs
+
+`GET /logs/{type}/read` returns recent log entries as **plain text** — handy for
+reading from a phone. It **requires the shared secret** (`X-Webhook-Secret`
+header). Routing matches writes: `blink` reads `logs/blink.log`, everything else
+reads `logs/default.log`.
+
+| Query | Meaning                                             |
+| ----- | --------------------------------------------------- |
+| `?n=N`| Return the most recent `N` entries (default `20`)   |
+| `?n=0`| Return the whole file                               |
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/logs/blink/read?n=30"
+```
+
+### From an iPhone Shortcut
+
+1. **Get Contents of URL** → `http://<server>:5050/logs/blink/read?n=30`
+2. **Method**: `GET` (POST also works).
+3. **Headers**: `X-Webhook-Secret` = your secret.
+4. Add **Show Result** (or **Quick Look**) on the *Contents of URL* — the log
+   text is displayed directly.
 
 ## Arm/disarm events
 

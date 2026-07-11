@@ -76,20 +76,24 @@ def test_pretty_format():
 
 
 def test_routing_by_type():
-    """blink -> blink.log; every other type -> default.log."""
+    """blink -> blink.log; upload -> upload.log; every other type -> default.log."""
     _setup_temp_env()
     log_engine.log("blink", "blink message")
-    log_engine.log("garage", "garage message")   # non-blink -> default.log
-    log_engine.log(None, "default message")       # default -> default.log
+    log_engine.log("upload", "upload message")    # own file
+    log_engine.log("garage", "garage message")    # non-special -> default.log
+    log_engine.log(None, "default message")        # default -> default.log
 
     blink = _read("blink")
+    upload = _read("upload")
     default = _read("default")
 
     assert "blink message" in blink
-    assert "blink message" not in default
+    assert "upload message" in upload
     assert "garage message" in default
     assert "default message" in default
-    assert "garage message" not in blink
+    # No cross-contamination between the files.
+    assert "upload message" not in blink and "upload message" not in default
+    assert "blink message" not in upload and "garage message" not in upload
     print("✅ test_routing_by_type")
 
 
@@ -130,6 +134,50 @@ def test_set_get_type_status():
     print("✅ test_set_get_type_status")
 
 
+def test_read_log_tail():
+    """read_log(type, n) returns only the most recent n entries."""
+    _setup_temp_env()
+    for i in range(5):
+        log_engine.log("blink", f"entry number {i}")
+    out = log_engine.read_log("blink", entries=2)
+    assert "entry number 4" in out and "entry number 3" in out
+    assert "entry number 0" not in out
+    assert out.count("=" * 80) == 2   # exactly two entry separators
+    print("✅ test_read_log_tail")
+
+
+def test_read_log_whole_and_missing():
+    """read_log returns the whole file with no n, and '' for a missing file."""
+    _setup_temp_env()
+    assert log_engine.read_log("blink") == ""          # nothing written yet
+    log_engine.log("default", "hello there")
+    assert "hello there" in log_engine.read_log("default")  # entries=None -> whole
+    assert log_engine.read_log("blink") == ""          # routed to a different file
+    print("✅ test_read_log_whole_and_missing")
+
+
+def test_read_not_gated_by_switches():
+    """Reading must work even when the master and per-type switches are OFF.
+
+    Writes are gated by job_config (master 'log') and log_config (per type);
+    reads are not — you can always retrieve what's already on disk.
+    """
+    tmp = _setup_temp_env()
+    log_engine.log("blink", "recorded while enabled")
+
+    # Turn OFF the master switch and disable the blink type.
+    (tmp / "job_config.json").write_text(json.dumps({"jobs": {"log": False}}))
+    log_engine.set_type_status("blink", False)
+
+    # New writes are now suppressed...
+    assert log_engine.log("blink", "should be suppressed") is False
+    # ...but reads still return what was written earlier.
+    out = log_engine.read_log("blink")
+    assert "recorded while enabled" in out
+    assert "should be suppressed" not in out
+    print("✅ test_read_not_gated_by_switches")
+
+
 def main():
     tests = [
         test_default_type,
@@ -140,6 +188,9 @@ def main():
         test_type_switch_off,
         test_master_switch_off,
         test_set_get_type_status,
+        test_read_log_tail,
+        test_read_log_whole_and_missing,
+        test_read_not_gated_by_switches,
     ]
     for t in tests:
         t()
