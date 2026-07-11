@@ -26,12 +26,10 @@ args = parser.parse_args()
 # Configure logging based on debug mode
 if args.debug:
     logging.basicConfig(level=logging.DEBUG)
-    os.environ['BLINK_DEBUG'] = 'true'
     print("Debug mode enabled")
 else:
     # In production, we want minimal logging
     logging.basicConfig(level=logging.WARNING)
-    os.environ['BLINK_DEBUG'] = 'false'
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +136,6 @@ def health():
 def list_jobs():
     """List all available jobs and their status."""
     config = load_config()
-    job_config = load_job_config()
 
     jobs = []
     for hook in config.get("webhooks", []):
@@ -154,48 +151,36 @@ def list_jobs():
     return jsonify({"jobs": jobs})
 
 
+def set_job_status(job_name, enabled):
+    """Persist a job's enabled/disabled status and log the change."""
+    job_config = load_job_config()
+    jobs = job_config.setdefault("jobs", {})
+    jobs[job_name] = enabled
+    job_config["last_modified"] = str(datetime.datetime.now())
+    save_job_config(job_config)
+    logger.info("Job %s %s", job_name, "enabled" if enabled else "disabled")
+
+
 @app.route("/jobs/<job_name>/enable", methods=["POST"])
 def enable_job(job_name):
     """Enable a specific job."""
-    job_config = load_job_config()
-    jobs = job_config.get("jobs", {})
-    jobs[job_name] = True
-    job_config["jobs"] = jobs
-    job_config["last_modified"] = str(datetime.datetime.now())
-
-    save_job_config(job_config)
-    logger.info("Job %s enabled", job_name)
+    set_job_status(job_name, True)
     return jsonify({"status": "ok", "message": f"Job {job_name} enabled"})
 
 
 @app.route("/jobs/<job_name>/disable", methods=["POST"])
 def disable_job(job_name):
     """Disable a specific job."""
-    job_config = load_job_config()
-    jobs = job_config.get("jobs", {})
-    jobs[job_name] = False
-    job_config["jobs"] = jobs
-    job_config["last_modified"] = str(datetime.datetime.now())
-
-    save_job_config(job_config)
-    logger.info("Job %s disabled", job_name)
+    set_job_status(job_name, False)
     return jsonify({"status": "ok", "message": f"Job {job_name} disabled"})
 
 
 @app.route("/jobs/<job_name>/toggle", methods=["POST"])
 def toggle_job(job_name):
     """Toggle the status of a specific job."""
-    job_config = load_job_config()
-    jobs = job_config.get("jobs", {})
-    current_status = jobs.get(job_name, True)  # Default to enabled
-    new_status = not current_status
-    jobs[job_name] = new_status
-    job_config["jobs"] = jobs
-    job_config["last_modified"] = str(datetime.datetime.now())
-
-    save_job_config(job_config)
+    new_status = not get_job_enabled_status(job_name)
+    set_job_status(job_name, new_status)
     action = "enabled" if new_status else "disabled"
-    logger.info("Job %s %s", job_name, action)
     return jsonify({"status": "ok", "message": f"Job {job_name} {action}"})
 
 

@@ -10,8 +10,8 @@ import json
 import logging
 from typing import Dict, Any
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+import requests
+
 logger = logging.getLogger(__name__)
 
 def load_config() -> Dict[str, str]:
@@ -53,8 +53,7 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         dict: Response with success/error message
     """
     # Debug logging for incoming payload
-    if os.environ.get('BLINK_DEBUG') == 'true':
-        logger.debug("Received payload: %s", payload)
+    logger.debug("Received payload: %s", payload)
 
     try:
         # Validate payload
@@ -93,8 +92,7 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         ha_entity_id = config["HA_ENTITY_ID"]
 
         # Debug logging for configuration
-        if os.environ.get('BLINK_DEBUG') == 'true':
-            logger.debug("Configuration loaded - Base URL: %s, Entity ID: %s", ha_base_url, ha_entity_id)
+        logger.debug("Configuration loaded - Base URL: %s, Entity ID: %s", ha_base_url, ha_entity_id)
 
         # Construct the correct API endpoint for Home Assistant
         if action == "arm":
@@ -103,8 +101,7 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
             api_endpoint = f"{ha_base_url}/api/services/alarm_control_panel/alarm_disarm"
 
         # Debug logging for API endpoint
-        if os.environ.get('BLINK_DEBUG') == 'true':
-            logger.debug("API endpoint for %s: %s", action, api_endpoint)
+        logger.debug("API endpoint for %s: %s", action, api_endpoint)
 
         # Prepare headers
         headers = {
@@ -118,24 +115,11 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         # Debug logging for request data
-        if os.environ.get('BLINK_DEBUG') == 'true':
-            logger.debug("Request headers: %s", headers)
-            logger.debug("Request data: %s", data)
-
-        # Import requests library dynamically to avoid import issues
-        try:
-            import requests
-        except ImportError:
-            error_msg = "Missing dependency - requests library is required"
-            logger.error(error_msg)
-            return {
-                "error": "Missing dependency",
-                "message": error_msg
-            }
+        logger.debug("Request headers: %s", headers)
+        logger.debug("Request data: %s", data)
 
         # Make the API call to Home Assistant
-        if os.environ.get('BLINK_DEBUG') == 'true':
-            logger.debug("Making API request to %s", api_endpoint)
+        logger.debug("Making API request to %s", api_endpoint)
 
         response = requests.post(
             api_endpoint,
@@ -145,9 +129,8 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         # Debug logging for response
-        if os.environ.get('BLINK_DEBUG') == 'true':
-            logger.debug("API Response Status: %d", response.status_code)
-            logger.debug("API Response Text: %s", response.text)
+        logger.debug("API Response Status: %d", response.status_code)
+        logger.debug("API Response Text: %s", response.text)
 
         # Check if the request was successful
         if response.status_code == 200:
