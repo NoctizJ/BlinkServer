@@ -1,79 +1,170 @@
-# Automation Webhook Server
+# Blink Server
 
-A generic Flask server for triggering automation jobs remotely via webhooks.
-`app.py` never needs to change — it just reads `config.json` and dynamically
-calls whatever job function you point it at.
+A Flask-based server that provides webhook endpoints for automating alarm systems via Home Assistant.
 
-## Structure
+## Features
 
-- `app.py` — generic server. Loads `config.json`, registers a POST route per
-  webhook entry, dynamically imports the configured module and calls its
-  `run(payload)` function.
-- `config.json` — declares webhooks: path, target module/function, optional
-  secret.
-- `jobs/sample_job.py` — example job. `run(payload)` logs the trigger and
-  payload and returns a JSON-serializable result.
-- `requirements.txt` — dependencies (just Flask).
+- Webhook endpoints for arm/disarm alarm systems
+- Secure authentication via shared secrets
+- Modular job system with easy extensibility
+- Logging and error handling
+- Dynamic job enable/disable functionality
+- Home Assistant integration for alarm panel control
 
-## Adding a new automation
+## Installation
 
-1. Create a new module under `jobs/` with a `run(payload)` function.
-2. Add an entry to `config.json`:
+1. Clone the repository
+2. Activate virtual environment:
+   ```bash
+   source venv/bin/activate
+   ```
+3. Install dependencies:
+   ```bash
+   python3 -m pip install -r requirements.txt
+   ```
+
+4. Set up Home Assistant integration:
+   
+   Create a `home_assistant_config.json` file in the root directory with your Home Assistant settings:
    ```json
    {
-     "path": "/webhook/my-job",
-     "module": "jobs.my_job",
-     "function": "run",
-     "secret": "optional-shared-secret"
+       "HA_BASE_URL": "http://localhost:8123",
+       "HA_API_KEY": "your_home_assistant_long_lived_access_token", 
+       "HA_ENTITY_ID": "alarm_control_panel.blink_armstrong"
    }
    ```
-3. Restart the server. No changes to `app.py` needed.
 
-## Running
+   **Note:** The `webhook_secret` is used to authenticate webhook requests. Make sure to use a strong, random secret value in production.
+
+## Usage Notes
+
+All commands should be run **within the activated virtual environment**:
 
 ```bash
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-./venv/bin/python app.py
+source venv/bin/activate
+python3 app.py --debug
 ```
 
-Server listens on `0.0.0.0:5000` by default. Override with `PORT`:
+## Webhook Endpoints
 
-```bash
-PORT=5050 ./venv/bin/python app.py
+### Arm System
+```
+POST /webhook/blink/arm
 ```
 
-> **macOS note:** port 5000 is often taken by AirPlay Receiver. Either use a
-> different `PORT`, or disable it in System Settings → General → AirDrop &
-> Handoff → AirPlay Receiver.
+### Disarm System
+```
+POST /webhook/blink/disarm
+```
 
-## Usage
+## Job Management
 
+The server includes a job management system that allows you to enable/disable jobs dynamically:
+
+- `GET /jobs` - List all jobs and their status
+- `POST /jobs/{job_name}/enable` - Enable a specific job  
+- `POST /jobs/{job_name}/disable` - Disable a specific job
+- `POST /jobs/{job_name}/toggle` - Toggle a job's enabled/disabled status
+
+## Configuration
+
+The server is configured via `config.json` which defines webhook endpoints and their associated jobs.
+
+### Webhook Endpoints
+
+Each webhook endpoint requires a configuration in `config.json`:
+
+```json
+{
+    "webhooks": [
+        {
+            "path": "/webhook/blink/arm",
+            "module": "jobs.home_assistant_arm_disarm",
+            "secret": "your-webhook-secret-here"
+        },
+        {
+            "path": "/webhook/blink/disarm", 
+            "module": "jobs.home_assistant_arm_disarm",
+            "secret": "your-webhook-secret-here"
+        }
+    ]
+}
+```
+
+The `module` field points to the Python module that handles the webhook request. This implementation only supports:
+- `jobs.home_assistant_arm_disarm` (Home Assistant implementation)
+
+### Job Management
+
+Jobs are defined in `job_config.json` and can be enabled/disabled dynamically through API endpoints:
+
+```json
+{
+    "jobs": {
+        "home_assistant_arm_disarm": {
+            "enabled": true
+        }
+    }
+}
+```
+
+## Usage Examples
+
+### Arm the system:
 ```bash
-curl -X POST http://127.0.0.1:5050/webhook/sample \
+curl -X POST http://localhost:5050/webhook/blink/arm \
   -H "Content-Type: application/json" \
-  -d '{"hello": "world"}'
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"action": "arm"}'
 ```
 
-(replace `5050` with `5000` if you didn't override `PORT`)
+### Disarm the system:
+```bash
+curl -X POST http://localhost:5050/webhook/blink/disarm \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"action": "disarm"}'
+```
 
-Health check: `GET /health`
+## Port Configuration
 
-## Auth
+By default, the server runs on port 5050. If you need to use a different port, set the `PORT` environment variable:
 
-If a webhook entry has a non-null `secret`, requests must include it in the
-`X-Webhook-Secret` header, or the server responds `401 Unauthorized`.
+```bash
+PORT=8080 python3 app.py --debug
+```
 
-## Remote access
+## Testing
 
-To reach this server from another device (phone, other machine) with a
-stable address, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
+Run the setup test to verify configuration:
+```bash
+python3 test_blink_setup.py
+```
 
-## Status / open items
+For local testing of the arm/disarm functionality, you can run:
 
-- Verified via Flask's in-process test client (routing, dynamic job dispatch,
-  404 on unknown routes, secret-header auth). Not yet tested over a real
-  HTTP socket — do that first when you run it locally.
-- Remote access model (LAN/VPN vs. public internet) and job model (fixed
-  named jobs vs. arbitrary commands) are still undecided — current setup
-  assumes local network and named jobs only.
+### 1. Direct function test (simulated):
+```bash
+python3 jobs/blink_arm_disarm.py
+```
+
+### 2. Server with debug mode for webhook testing:
+```bash
+# Start server in debug mode
+python3 app.py --debug
+
+# Then test with curl commands from the Usage Examples section
+```
+
+### 3. Full end-to-end testing:
+- Start the server: `python3 app.py`
+- Test arm endpoint: `curl -X POST http://localhost:5050/webhook/blink/arm ...`
+- Test disarm endpoint: `curl -X POST http://localhost:5050/webhook/blink/disarm ...`
+
+## Security
+
+All webhook endpoints require authentication via the `X-Webhook-Secret` header. Make sure to use a strong secret value in production.
+
+## License
+
+MIT

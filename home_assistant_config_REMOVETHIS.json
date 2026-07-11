@@ -1,0 +1,5 @@
+{
+    "HA_BASE_URL": "http://localhost:8123",
+    "HA_API_KEY": "your_home_assistant_long_lived_access_token",
+    "HA_ENTITY_ID": "alarm_control_panel.blink_armstrong"
+}

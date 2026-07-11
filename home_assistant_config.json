@@ -1,0 +1,5 @@
+{
+    "HA_BASE_URL": "http://localhost:8123",
+    "HA_API_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhN2IyZDY3ZjE3YmY0MmZmYTJjNTQ0YTA4MGFkMjk5NiIsImlhdCI6MTc4MzcwNDkyNSwiZXhwIjoyMDk5MDY0OTI1fQ.em6IZq0sSoF9BQHWcysrDXGpXrk-67gFWowd11lohxM",
+    "HA_ENTITY_ID": "alarm_control_panel.blink_armstrong"
+}

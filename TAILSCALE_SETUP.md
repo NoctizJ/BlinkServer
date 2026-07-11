@@ -44,7 +44,7 @@ the same tailnet automatically.
 
 ```bash
 cd ~/Documents/automation-server
-PORT=5050 ./venv/bin/python app.py
+PORT=5050 ./venv/bin/python3 app.py
 ```
 
 The server already binds to `0.0.0.0`, so it's reachable on the Tailscale

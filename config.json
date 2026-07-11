@@ -1,0 +1,22 @@
+{
+  "webhooks": [
+    {
+      "path": "/webhook/sample",
+      "module": "jobs.sample_job",
+      "function": "run",
+      "secret": null
+    },
+    {
+      "path": "/webhook/blink/arm",
+      "module": "jobs.home_assistant_arm_disarm",
+      "function": "run",
+      "secret": "your-shared-secret-here"
+    },
+    {
+      "path": "/webhook/blink/disarm",
+      "module": "jobs.home_assistant_arm_disarm",
+      "function": "run",
+      "secret": "your-shared-secret-here"
+    }
+  ]
+}

@@ -57,4 +57,4 @@ desktop.ini
 *.log
 
 # Local config
-config.json
+credentials.json
