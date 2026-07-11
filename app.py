@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import argparse
+from functools import wraps
 from pathlib import Path
 import datetime
 
@@ -64,6 +65,35 @@ def load_webhook_secret():
         return None
 
 
+def check_webhook_secret():
+    """Validate the X-Webhook-Secret header against the shared secret.
+
+    Returns an error (response, status) tuple to short-circuit with, or None
+    when the request is authorized.
+    """
+    expected = load_webhook_secret()
+    if not expected:
+        logger.error(
+            "%s requires a secret but none is configured "
+            "(see webhook_secret.example.json)", request.path
+        )
+        return jsonify({"error": "server misconfigured: webhook secret not set"}), 500
+    if request.headers.get("X-Webhook-Secret") != expected:
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+
+def require_webhook_secret(view):
+    """Decorator that requires the shared secret on a management route."""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        error = check_webhook_secret()
+        if error:
+            return error
+        return view(*args, **kwargs)
+    return wrapper
+
+
 def load_job_config():
     """Load job configuration including enabled/disabled status."""
     try:
@@ -98,16 +128,9 @@ def make_handler(hook):
 
     def handler():
         if require_secret:
-            expected = load_webhook_secret()
-            if not expected:
-                logger.error(
-                    "webhook %s requires a secret but none is configured "
-                    "(see webhook_secret.example.json)", hook.get("path")
-                )
-                return jsonify({"error": "server misconfigured: webhook secret not set"}), 500
-            provided = request.headers.get("X-Webhook-Secret")
-            if provided != expected:
-                return jsonify({"error": "unauthorized"}), 401
+            error = check_webhook_secret()
+            if error:
+                return error
 
         payload = request.get_json(silent=True) or {}
 
@@ -189,6 +212,7 @@ def set_job_status(job_name, enabled):
 
 
 @app.route("/jobs/<job_name>/enable", methods=["POST"])
+@require_webhook_secret
 def enable_job(job_name):
     """Enable a specific job."""
     set_job_status(job_name, True)
@@ -196,6 +220,7 @@ def enable_job(job_name):
 
 
 @app.route("/jobs/<job_name>/disable", methods=["POST"])
+@require_webhook_secret
 def disable_job(job_name):
     """Disable a specific job."""
     set_job_status(job_name, False)
@@ -203,6 +228,7 @@ def disable_job(job_name):
 
 
 @app.route("/jobs/<job_name>/toggle", methods=["POST"])
+@require_webhook_secret
 def toggle_job(job_name):
     """Toggle the status of a specific job."""
     new_status = not get_job_enabled_status(job_name)
@@ -235,6 +261,7 @@ def set_log_type_status(log_type, enabled):
 
 
 @app.route("/logs/<log_type>/enable", methods=["POST"])
+@require_webhook_secret
 def enable_log_type(log_type):
     """Enable a specific log type."""
     name = set_log_type_status(log_type, True)
@@ -242,6 +269,7 @@ def enable_log_type(log_type):
 
 
 @app.route("/logs/<log_type>/disable", methods=["POST"])
+@require_webhook_secret
 def disable_log_type(log_type):
     """Disable a specific log type."""
     name = set_log_type_status(log_type, False)
@@ -249,6 +277,7 @@ def disable_log_type(log_type):
 
 
 @app.route("/logs/<log_type>/toggle", methods=["POST"])
+@require_webhook_secret
 def toggle_log_type(log_type):
     """Toggle the status of a specific log type."""
     new_status = not get_type_enabled_status(log_type)

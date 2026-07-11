@@ -72,23 +72,25 @@ ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
 
 ## API
 
-| Method | Path                          | Description                     |
-| ------ | ----------------------------- | ------------------------------- |
-| POST   | `/webhook/blink/arm`          | Arm the alarm panel             |
-| POST   | `/webhook/blink/disarm`       | Disarm the alarm panel          |
+| Method | Path                          | Description                        |
+| ------ | ----------------------------- | ---------------------------------- |
+| POST   | `/webhook/blink/arm`          | Arm the alarm panel                |
+| POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](Logging.md)) |
-| GET    | `/jobs`                       | List jobs and their status      |
-| POST   | `/jobs/{job_name}/enable`     | Enable a job                    |
-| POST   | `/jobs/{job_name}/disable`    | Disable a job                   |
-| POST   | `/jobs/{job_name}/toggle`     | Toggle a job on/off             |
-| GET    | `/logs`                       | List log types and their status |
-| POST   | `/logs/{type}/enable`         | Enable a log type               |
-| POST   | `/logs/{type}/disable`        | Disable a log type              |
-| POST   | `/logs/{type}/toggle`         | Toggle a log type on/off        |
-| GET    | `/health`                     | Health check                    |
+| GET    | `/jobs`                       | List jobs and their status         |
+| POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
+| POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
+| POST   | `/jobs/{job_name}/toggle`     | Toggle a job on/off 🔒              |
+| GET    | `/logs`                       | List log types and their status    |
+| POST   | `/logs/{type}/enable`         | Enable a log type 🔒                |
+| POST   | `/logs/{type}/disable`        | Disable a log type 🔒               |
+| POST   | `/logs/{type}/toggle`         | Toggle a log type on/off 🔒         |
+| GET    | `/health`                     | Health check                       |
 
-Webhook requests must include the matching secret in the `X-Webhook-Secret`
-header (see [Security](#security)).
+🔒 endpoints always require the shared secret in the `X-Webhook-Secret` header.
+Webhooks require it only when their `require_secret` is `true`. Read-only
+endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. See
+[Security](#security).
 
 ### Examples
 
@@ -104,6 +106,13 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
   -d '{"action": "disarm"}'
+
+# Toggle a job or log type (secret required)
+curl -X POST http://localhost:5050/jobs/log/toggle \
+  -H "X-Webhook-Secret: your-shared-secret-here"
+
+curl -X POST http://localhost:5050/logs/blink/disable \
+  -H "X-Webhook-Secret: your-shared-secret-here"
 ```
 
 ## Configuration
@@ -156,10 +165,13 @@ python3 app.py --debug                      # then hit endpoints with curl
 
 ## Security
 
-Webhooks with `"require_secret": true` require the shared secret (from
+Webhooks with `"require_secret": true`, and every state-changing management
+endpoint (`/jobs/{name}/enable|disable|toggle` and
+`/logs/{type}/enable|disable|toggle`), require the shared secret (from
 `webhook_secret.json`) in the `X-Webhook-Secret` header; requests without it
-get `401`. Use a strong, random secret in production, and prefer a private
-network (e.g. Tailscale) over public exposure.
+get `401`. Read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open.
+Use a strong, random secret in production, and prefer a private network
+(e.g. Tailscale) over public exposure.
 
 ## License
 
