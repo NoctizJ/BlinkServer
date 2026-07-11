@@ -17,6 +17,12 @@ import datetime
 
 from flask import Flask, jsonify, request
 
+from jobs.log_engine import (
+    load_log_config,
+    get_type_enabled_status,
+    set_type_status,
+)
+
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
 parser.add_argument('--debug', action='store_true', help='Enable debug mode with verbose logging')
@@ -182,6 +188,52 @@ def toggle_job(job_name):
     set_job_status(job_name, new_status)
     action = "enabled" if new_status else "disabled"
     return jsonify({"status": "ok", "message": f"Job {job_name} {action}"})
+
+
+# Log management endpoints
+#
+# The master log switch is the "log" job in job_config.json — toggle it with
+# the generic job endpoints above (e.g. POST /jobs/log/disable). The endpoints
+# below manage the per-type switches in log_config.json.
+@app.route("/logs")
+def list_log_types():
+    """List all configured log types and their on/off status."""
+    log_config = load_log_config()
+    types = [
+        {"type": name, "enabled": enabled}
+        for name, enabled in log_config.get("types", {}).items()
+    ]
+    return jsonify({"log_types": types})
+
+
+def set_log_type_status(log_type, enabled):
+    """Persist a log type's enabled/disabled status and log the change."""
+    normalized = set_type_status(log_type, enabled)
+    logger.info("Log type %s %s", normalized, "enabled" if enabled else "disabled")
+    return normalized
+
+
+@app.route("/logs/<log_type>/enable", methods=["POST"])
+def enable_log_type(log_type):
+    """Enable a specific log type."""
+    name = set_log_type_status(log_type, True)
+    return jsonify({"status": "ok", "message": f"Log type {name} enabled"})
+
+
+@app.route("/logs/<log_type>/disable", methods=["POST"])
+def disable_log_type(log_type):
+    """Disable a specific log type."""
+    name = set_log_type_status(log_type, False)
+    return jsonify({"status": "ok", "message": f"Log type {name} disabled"})
+
+
+@app.route("/logs/<log_type>/toggle", methods=["POST"])
+def toggle_log_type(log_type):
+    """Toggle the status of a specific log type."""
+    new_status = not get_type_enabled_status(log_type)
+    name = set_log_type_status(log_type, new_status)
+    action = "enabled" if new_status else "disabled"
+    return jsonify({"status": "ok", "message": f"Log type {name} {action}"})
 
 
 config = load_config()

@@ -12,6 +12,12 @@ from typing import Dict, Any
 
 import requests
 
+try:
+    # Logging engine — records arm/disarm events under the "blink" log type.
+    from jobs.log_engine import log as write_log
+except ImportError:  # pragma: no cover - allows running this file directly
+    from log_engine import log as write_log
+
 logger = logging.getLogger(__name__)
 
 def load_config() -> Dict[str, str]:
@@ -136,6 +142,7 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         if response.status_code == 200:
             message = f"Successfully {action}ed the system"
             logger.info(message)
+            write_log("blink", f"{action.upper()} event: {message} (entity: {ha_entity_id})")
             return {
                 "message": message,
                 "status": "success"
@@ -143,6 +150,7 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             error_msg = f"HTTP {response.status_code}: {response.text}"
             logger.error(f"Failed to {action} system: {error_msg}")
+            write_log("blink", f"{action.upper()} event FAILED: {error_msg} (entity: {ha_entity_id})")
             return {
                 "error": f"Failed to {action} system",
                 "message": f"Error occurred while trying to {action} the system: {error_msg}",
@@ -151,10 +159,12 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Unexpected error during {action} operation: {error_msg}")
+        action_label = payload.get("action", "unknown") if isinstance(payload, dict) else "unknown"
+        logger.error(f"Unexpected error during {action_label} operation: {error_msg}")
+        write_log("blink", f"{action_label.upper()} event ERROR: {error_msg}")
         return {
             "error": "Operation failed",
-            "message": f"Error occurred while trying to {action} the system: {error_msg}",
+            "message": f"Error occurred while trying to {action_label} the system: {error_msg}",
             "status": "error"
         }
 

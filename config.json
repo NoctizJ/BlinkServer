@@ -11,6 +11,12 @@
       "module": "jobs.home_assistant_arm_disarm",
       "function": "run",
       "secret": "your-shared-secret-here"
+    },
+    {
+      "path": "/webhook/log",
+      "module": "jobs.log_webhook",
+      "function": "run",
+      "secret": null
     }
   ]
 }

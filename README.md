@@ -10,6 +10,7 @@ server code.
 - Shared-secret authentication per webhook
 - Modular jobs — drop a new module in `jobs/` and register it in `config.json`
 - Enable/disable jobs at runtime via the API
+- Structured, searchable logging with master + per-type switches — see [Logging.md](Logging.md)
 
 ## Installation
 
@@ -59,10 +60,15 @@ ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
 | ------ | ----------------------------- | ------------------------------- |
 | POST   | `/webhook/blink/arm`          | Arm the alarm panel             |
 | POST   | `/webhook/blink/disarm`       | Disarm the alarm panel          |
+| POST   | `/webhook/log`                | Write a log entry (see [Logging.md](Logging.md)) |
 | GET    | `/jobs`                       | List jobs and their status      |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job                    |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job                   |
 | POST   | `/jobs/{job_name}/toggle`     | Toggle a job on/off             |
+| GET    | `/logs`                       | List log types and their status |
+| POST   | `/logs/{type}/enable`         | Enable a log type               |
+| POST   | `/logs/{type}/disable`        | Disable a log type              |
+| POST   | `/logs/{type}/toggle`         | Toggle a log type on/off        |
 | GET    | `/health`                     | Health check                    |
 
 Webhook requests must include the matching secret in the `X-Webhook-Secret`
@@ -119,6 +125,7 @@ and updated through the `/jobs` endpoints — you rarely edit it by hand:
 ```bash
 python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
 python3 test_job_management.py              # job enable/disable logic
+python3 test_log_engine.py                  # logging engine tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
 
