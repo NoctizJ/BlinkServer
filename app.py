@@ -22,6 +22,7 @@ from jobs.log_engine import (
     load_log_config,
     get_type_enabled_status,
     set_type_status,
+    MASTER_SWITCH,
 )
 
 # Set up argument parsing for debug mode
@@ -201,6 +202,20 @@ def list_jobs():
     return jsonify({"jobs": jobs})
 
 
+def known_job_names():
+    """Return the set of valid job names.
+
+    A job is valid if it is backed by a webhook in config.json, or if it is a
+    special switch that has no webhook (e.g. the ``log`` master switch). This
+    prevents the management endpoints from creating phantom job entries for
+    unknown/typo/stale names (e.g. a leftover ``arm`` caller).
+    """
+    names = {hook["module"].split(".")[-1]
+             for hook in load_config().get("webhooks", [])}
+    names.add(MASTER_SWITCH)  # "log" — the logging master switch
+    return names
+
+
 def set_job_status(job_name, enabled):
     """Persist a job's enabled/disabled status and log the change."""
     job_config = load_job_config()
@@ -211,10 +226,20 @@ def set_job_status(job_name, enabled):
     logger.info("Job %s %s", job_name, "enabled" if enabled else "disabled")
 
 
+def unknown_job_response(job_name):
+    """Return a 404 response if job_name is not a known job, else None."""
+    if job_name not in known_job_names():
+        return jsonify({"error": "unknown job", "message": f"No such job: {job_name}"}), 404
+    return None
+
+
 @app.route("/jobs/<job_name>/enable", methods=["POST"])
 @require_webhook_secret
 def enable_job(job_name):
     """Enable a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     set_job_status(job_name, True)
     return jsonify({"status": "ok", "message": f"Job {job_name} enabled"})
 
@@ -223,6 +248,9 @@ def enable_job(job_name):
 @require_webhook_secret
 def disable_job(job_name):
     """Disable a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     set_job_status(job_name, False)
     return jsonify({"status": "ok", "message": f"Job {job_name} disabled"})
 
@@ -231,6 +259,9 @@ def disable_job(job_name):
 @require_webhook_secret
 def toggle_job(job_name):
     """Toggle the status of a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     new_status = not get_job_enabled_status(job_name)
     set_job_status(job_name, new_status)
     action = "enabled" if new_status else "disabled"
