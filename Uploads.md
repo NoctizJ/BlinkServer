@@ -71,6 +71,19 @@ curl -X POST http://localhost:5050/webhook/upload \
 - There is no upload size cap by default, so large videos work. To add one, set
   `app.config["MAX_CONTENT_LENGTH"]` in `app.py` (returns `413` when exceeded).
 - The job is enabled/disabled like any other via `/jobs/file_upload/...`.
+- File parts without a filename (as Shortcuts sometimes send) are still saved,
+  with the extension inferred from the MIME type (e.g. `..._upload.jpg`).
+
+## Troubleshooting
+
+If the response is `{"error": "no files", ...}`, it includes a `debug` object
+showing what actually arrived:
+
+- `content_type` is `application/json` → the Shortcut's **Request Body** is
+  still JSON; switch it to **Form**.
+- `form_fields` lists your field but `file_fields` is empty → the field is a
+  **Text** field; change its type to **File**.
+- both empty → no field was attached, or the request never carried a body.
 
 ## Testing
 

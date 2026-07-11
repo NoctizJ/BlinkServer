@@ -86,7 +86,7 @@ def test_requires_secret():
 
 
 def test_no_files():
-    """A request with no file parts returns a clear error, saves nothing."""
+    """A request with no file parts returns a clear error + debug, saves nothing."""
     tmp = _fresh_files_dir()
     client = app.app.test_client()
     resp = client.post(
@@ -96,9 +96,38 @@ def test_no_files():
         content_type="multipart/form-data",
     )
     assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["result"]["error"] == "no files"
+    result = resp.get_json()["result"]
+    assert result["error"] == "no files"
+    assert "debug" in result and "content_type" in result["debug"]
     assert list(tmp.iterdir()) == []
     print("✅ test_no_files")
+
+
+def test_file_without_filename():
+    """A file part with an empty filename (as Shortcuts may send) is still saved."""
+    tmp = _fresh_files_dir()
+    client = app.app.test_client()
+    boundary = "----blinktest"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename=""\r\n'
+        "Content-Type: image/jpeg\r\n\r\n"
+        "JPEGDATA\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    resp = client.post(
+        "/webhook/upload",
+        data=body,
+        headers={"X-Webhook-Secret": _secret()},
+        content_type=f"multipart/form-data; boundary={boundary}",
+    )
+    assert resp.status_code == 200, resp.get_json()
+    result = resp.get_json()["result"]
+    assert result.get("count") == 1, result
+    stored = list(tmp.iterdir())
+    assert len(stored) == 1
+    assert stored[0].read_bytes() == b"JPEGDATA"
+    print("✅ test_file_without_filename:", result["files"][0]["stored_as"])
 
 
 def main():
@@ -107,6 +136,7 @@ def main():
         test_multiple_files,
         test_requires_secret,
         test_no_files,
+        test_file_without_filename,
     ]
     for t in tests:
         t()
