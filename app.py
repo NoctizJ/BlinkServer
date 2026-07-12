@@ -12,10 +12,19 @@ import json
 import logging
 import os
 import argparse
+from functools import wraps
 from pathlib import Path
 import datetime
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
+
+from jobs.log_engine import (
+    load_log_config,
+    get_type_enabled_status,
+    set_type_status,
+    read_log,
+    MASTER_SWITCH,
+)
 
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
@@ -35,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 JOB_CONFIG_PATH = Path(__file__).parent / "job_config.json"
+WEBHOOK_SECRET_PATH = Path(__file__).parent / "webhook_secret.json"
 
 app = Flask(__name__)
 
@@ -42,6 +52,48 @@ app = Flask(__name__)
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def load_webhook_secret():
+    """Load the single shared webhook secret from webhook_secret.json.
+
+    The file is gitignored (see webhook_secret.example.json for the format).
+    Returns the secret string, or None if the file is missing/unreadable.
+    """
+    try:
+        with open(WEBHOOK_SECRET_PATH) as f:
+            return json.load(f).get("WEBHOOK_SECRET")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def check_webhook_secret():
+    """Validate the X-Webhook-Secret header against the shared secret.
+
+    Returns an error (response, status) tuple to short-circuit with, or None
+    when the request is authorized.
+    """
+    expected = load_webhook_secret()
+    if not expected:
+        logger.error(
+            "%s requires a secret but none is configured "
+            "(see webhook_secret.example.json)", request.path
+        )
+        return jsonify({"error": "server misconfigured: webhook secret not set"}), 500
+    if request.headers.get("X-Webhook-Secret") != expected:
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+
+def require_webhook_secret(view):
+    """Decorator that requires the shared secret on a management route."""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        error = check_webhook_secret()
+        if error:
+            return error
+        return view(*args, **kwargs)
+    return wrapper
 
 
 def load_job_config():
@@ -74,13 +126,13 @@ def get_job_enabled_status(job_name):
 def make_handler(hook):
     module_name = hook["module"]
     function_name = hook.get("function", "run")
-    secret = hook.get("secret")
+    require_secret = hook.get("require_secret", False)
 
     def handler():
-        if secret:
-            provided = request.headers.get("X-Webhook-Secret")
-            if provided != secret:
-                return jsonify({"error": "unauthorized"}), 401
+        if require_secret:
+            error = check_webhook_secret()
+            if error:
+                return error
 
         payload = request.get_json(silent=True) or {}
 
@@ -151,6 +203,20 @@ def list_jobs():
     return jsonify({"jobs": jobs})
 
 
+def known_job_names():
+    """Return the set of valid job names.
+
+    A job is valid if it is backed by a webhook in config.json, or if it is a
+    special switch that has no webhook (e.g. the ``log`` master switch). This
+    prevents the management endpoints from creating phantom job entries for
+    unknown/typo/stale names (e.g. a leftover ``arm`` caller).
+    """
+    names = {hook["module"].split(".")[-1]
+             for hook in load_config().get("webhooks", [])}
+    names.add(MASTER_SWITCH)  # "log" — the logging master switch
+    return names
+
+
 def set_job_status(job_name, enabled):
     """Persist a job's enabled/disabled status and log the change."""
     job_config = load_job_config()
@@ -161,27 +227,108 @@ def set_job_status(job_name, enabled):
     logger.info("Job %s %s", job_name, "enabled" if enabled else "disabled")
 
 
+def unknown_job_response(job_name):
+    """Return a 404 response if job_name is not a known job, else None."""
+    if job_name not in known_job_names():
+        return jsonify({"error": "unknown job", "message": f"No such job: {job_name}"}), 404
+    return None
+
+
 @app.route("/jobs/<job_name>/enable", methods=["POST"])
+@require_webhook_secret
 def enable_job(job_name):
     """Enable a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     set_job_status(job_name, True)
     return jsonify({"status": "ok", "message": f"Job {job_name} enabled"})
 
 
 @app.route("/jobs/<job_name>/disable", methods=["POST"])
+@require_webhook_secret
 def disable_job(job_name):
     """Disable a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     set_job_status(job_name, False)
     return jsonify({"status": "ok", "message": f"Job {job_name} disabled"})
 
 
 @app.route("/jobs/<job_name>/toggle", methods=["POST"])
+@require_webhook_secret
 def toggle_job(job_name):
     """Toggle the status of a specific job."""
+    unknown = unknown_job_response(job_name)
+    if unknown:
+        return unknown
     new_status = not get_job_enabled_status(job_name)
     set_job_status(job_name, new_status)
     action = "enabled" if new_status else "disabled"
     return jsonify({"status": "ok", "message": f"Job {job_name} {action}"})
+
+
+# Log management endpoints
+#
+# The master log switch is the "log" job in job_config.json — toggle it with
+# the generic job endpoints above (e.g. POST /jobs/log/disable). The endpoints
+# below manage the per-type switches in log_config.json.
+@app.route("/logs")
+def list_log_types():
+    """List all configured log types and their on/off status."""
+    log_config = load_log_config()
+    types = [
+        {"type": name, "enabled": enabled}
+        for name, enabled in log_config.get("types", {}).items()
+    ]
+    return jsonify({"log_types": types})
+
+
+def set_log_type_status(log_type, enabled):
+    """Persist a log type's enabled/disabled status and log the change."""
+    normalized = set_type_status(log_type, enabled)
+    logger.info("Log type %s %s", normalized, "enabled" if enabled else "disabled")
+    return normalized
+
+
+@app.route("/logs/<log_type>/enable", methods=["POST"])
+@require_webhook_secret
+def enable_log_type(log_type):
+    """Enable a specific log type."""
+    name = set_log_type_status(log_type, True)
+    return jsonify({"status": "ok", "message": f"Log type {name} enabled"})
+
+
+@app.route("/logs/<log_type>/disable", methods=["POST"])
+@require_webhook_secret
+def disable_log_type(log_type):
+    """Disable a specific log type."""
+    name = set_log_type_status(log_type, False)
+    return jsonify({"status": "ok", "message": f"Log type {name} disabled"})
+
+
+@app.route("/logs/<log_type>/toggle", methods=["POST"])
+@require_webhook_secret
+def toggle_log_type(log_type):
+    """Toggle the status of a specific log type."""
+    new_status = not get_type_enabled_status(log_type)
+    name = set_log_type_status(log_type, new_status)
+    action = "enabled" if new_status else "disabled"
+    return jsonify({"status": "ok", "message": f"Log type {name} {action}"})
+
+
+@app.route("/logs/<log_type>/read", methods=["GET", "POST"])
+@require_webhook_secret
+def read_log_type(log_type):
+    """Return recent log entries for a type as plain text (blink -> blink.log,
+    else default.log). Use ?n=<count> for the number of most recent entries
+    (default 20; n<=0 returns the whole file)."""
+    n = request.args.get("n", default=20, type=int)
+    text = read_log(log_type, entries=n)
+    if not text:
+        text = f"(no log entries for '{log_type}')\n"
+    return Response(text, mimetype="text/plain")
 
 
 config = load_config()

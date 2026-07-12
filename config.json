@@ -4,13 +4,25 @@
       "path": "/webhook/sample",
       "module": "jobs.sample_job",
       "function": "run",
-      "secret": null
+      "require_secret": false
     },
     {
       "path": "/webhook/blink/arm",
       "module": "jobs.home_assistant_arm_disarm",
       "function": "run",
-      "secret": "your-shared-secret-here"
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/log",
+      "module": "jobs.log_webhook",
+      "function": "run",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/upload",
+      "module": "jobs.file_upload",
+      "function": "run",
+      "require_secret": true
     }
   ]
 }

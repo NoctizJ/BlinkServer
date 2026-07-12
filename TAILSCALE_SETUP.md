@@ -53,8 +53,8 @@ Use the IP from step 2.
 ## Notes
 
 - Only devices on your tailnet can reach this address — it isn't publicly
-  routable. Still, keep a `secret` on any webhook that triggers something
-  sensitive.
+  routable. Still, keep `"require_secret": true` on any webhook that triggers
+  something sensitive.
 - For a name instead of an IP, enable **MagicDNS** in the
   [admin console](https://login.tailscale.com/admin/dns), then use something
   like `http://your-laptop-name:5050`.
