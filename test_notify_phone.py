@@ -71,18 +71,22 @@ def test_config_precedence():
 
 
 def test_leaving_arms_arriving_disarms():
-    """Leaving home arms the panel; arriving home disarms it (config default)."""
+    """When the flag is on, leaving arms the panel and arriving disarms it.
+
+    The flag is passed explicitly here so the test is deterministic regardless
+    of the current notify_config.json values.
+    """
     print("Testing arm-on-leaving / disarm-on-arriving...")
     with mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
             mock.patch.object(np, "set_alarm", return_value={"status": "success"}) as alarm, \
             mock.patch.object(np, "write_log"):
-        res = np.leaving_home({})
+        res = np.leaving_home({"arm": True})
         alarm.assert_called_once_with("arm")
         assert res["alarm"]["status"] == "success"
         assert res["notify"]["status"] == "success"
 
         alarm.reset_mock()
-        np.arriving_home({})
+        np.arriving_home({"disarm": True})
         alarm.assert_called_once_with("disarm")
     print("  OK: leaving -> arm, arriving -> disarm")
 

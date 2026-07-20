@@ -122,15 +122,11 @@ endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. See
 ```bash
 # Arm
 curl -X POST http://localhost:5050/webhook/blink/arm \
-  -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: your-shared-secret-here" \
-  -d '{"action": "arm"}'
+  -H "X-Webhook-Secret: your-shared-secret-here"
 
 # Disarm
 curl -X POST http://localhost:5050/webhook/blink/disarm \
-  -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: your-shared-secret-here" \
-  -d '{"action": "disarm"}'
+  -H "X-Webhook-Secret: your-shared-secret-here"
 
 # Notify your phone (title/message default to notify_config.json; override per request)
 curl -X POST http://localhost:5050/webhook/notify/leaving \

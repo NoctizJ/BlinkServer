@@ -9,7 +9,13 @@
     {
       "path": "/webhook/blink/arm",
       "module": "jobs.home_assistant_arm_disarm",
-      "function": "run",
+      "function": "arm",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/blink/disarm",
+      "module": "jobs.home_assistant_arm_disarm",
+      "function": "disarm",
       "require_secret": true
     },
     {

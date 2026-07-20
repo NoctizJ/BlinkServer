@@ -132,9 +132,30 @@ def set_alarm(action: str) -> Dict[str, Any]:
         }
 
 
+def arm(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/blink/arm — arm the alarm panel.
+
+    The intent comes from the route, so no payload is required.
+    """
+    logger.debug("arm handler payload: %s", payload)
+    return set_alarm("arm")
+
+
+def disarm(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/blink/disarm — disarm the alarm panel.
+
+    The intent comes from the route, so no payload is required.
+    """
+    logger.debug("disarm handler payload: %s", payload)
+    return set_alarm("disarm")
+
+
 def run(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute arm or disarm action on Home Assistant alarm panel.
+    Execute arm or disarm based on an ``action`` field in the payload.
+
+    Retained for backward compatibility; the dedicated ``arm``/``disarm``
+    handlers above are the preferred entry points and need no payload.
 
     Args:
         payload (dict): The request payload containing the action
