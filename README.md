@@ -8,10 +8,10 @@ server code.
 
 - Arm/disarm webhook endpoints backed by Home Assistant
 - Single shared-secret authentication for webhooks
-- Modular jobs — drop a new module in `jobs/` and register it in `config.json`
+- Modular jobs — drop a new module in `jobs/` and register it in `configs/config.json`
 - Enable/disable jobs at runtime via the API
-- Structured, searchable logging with master + per-type switches — see [Logging.md](Logging.md)
-- File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](Uploads.md)
+- Structured, searchable logging with master + per-type switches — see [Logging.md](docs/Logging.md)
+- File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 
 ## Installation
 
@@ -24,7 +24,7 @@ python3 -m pip install -r requirements.txt
 Then create your Home Assistant config:
 
 ```bash
-cp home_assistant_config.example.json home_assistant_config.json
+cp configs/home_assistant_config.example.json configs/home_assistant_config.json
 ```
 
 Fill in your values:
@@ -37,12 +37,12 @@ Fill in your values:
 }
 ```
 
-> `home_assistant_config.json` holds a secret token and is gitignored — never commit it.
+> `configs/home_assistant_config.json` holds a secret token and is gitignored — never commit it.
 
 `HA_NOTIFY_TARGET` (e.g. `mobile_app_aisingioro`) is only needed for the phone
 notification webhooks (`/webhook/notify/*`); it names the Home Assistant
 `notify` service target for your phone. The notification titles and messages are
-configurable in **`notify_config.json`**, which also controls whether each
+configurable in **`configs/notify_config.json`**, which also controls whether each
 event arms/disarms the alarm panel:
 
 ```json
@@ -56,13 +56,13 @@ event arms/disarms the alarm panel:
   disarms it (reusing the same Home Assistant panel as `/webhook/blink/*`). Set
   to `false` to notify only.
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
-  in its JSON body (payload wins over `notify_config.json`, which wins over the
+  in its JSON body (payload wins over `configs/notify_config.json`, which wins over the
   built-in defaults).
 
 Then set the shared webhook secret:
 
 ```bash
-cp webhook_secret.example.json webhook_secret.json
+cp configs/webhook_secret.example.json configs/webhook_secret.json
 ```
 
 Put a long, random string in it:
@@ -73,9 +73,9 @@ Put a long, random string in it:
 }
 ```
 
-> `webhook_secret.json` is gitignored — never commit it.
+> `configs/webhook_secret.json` is gitignored — never commit it.
 
-See [Home Assistant Setup.md](Home%20Assistant%20Setup.md) for how to run Home
+See [Home-Assistant-Setup.md](docs/Home-Assistant-Setup.md) for how to run Home
 Assistant and generate a token.
 
 ## Running
@@ -89,7 +89,7 @@ PORT=8080 python3 app.py  # custom port
 ```
 
 The server binds to `0.0.0.0`. To reach it from other devices without exposing
-ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
+ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 
 ## API
 
@@ -97,8 +97,8 @@ ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
 | ------ | ----------------------------- | ---------------------------------- |
 | POST   | `/webhook/blink/arm`          | Arm the alarm panel                |
 | POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
-| POST   | `/webhook/log`                | Write a log entry (see [Logging.md](Logging.md)) |
-| POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](Uploads.md)) 🔒 |
+| POST   | `/webhook/log`                | Write a log entry (see [Logging.md](docs/Logging.md)) |
+| POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](docs/Uploads.md)) 🔒 |
 | POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home 🔒 |
 | POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
@@ -128,7 +128,7 @@ curl -X POST http://localhost:5050/webhook/blink/arm \
 curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "X-Webhook-Secret: your-shared-secret-here"
 
-# Notify your phone (title/message default to notify_config.json; override per request)
+# Notify your phone (title/message default to configs/notify_config.json; override per request)
 curl -X POST http://localhost:5050/webhook/notify/leaving \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here"
@@ -148,7 +148,7 @@ curl -X POST http://localhost:5050/logs/blink/disable \
 
 ## Configuration
 
-**`config.json`** maps webhook paths to job modules:
+**`configs/config.json`** maps webhook paths to job modules:
 
 ```json
 {
@@ -165,7 +165,7 @@ curl -X POST http://localhost:5050/logs/blink/disable \
 - `module` — the job module that handles the request (must expose a `run(payload)` function)
 - `require_secret` — when `true`, the request must include the shared secret in the `X-Webhook-Secret` header; `false` disables auth for that webhook
 
-**`webhook_secret.json`** holds the single shared secret used by every
+**`configs/webhook_secret.json`** holds the single shared secret used by every
 authenticated webhook. It is gitignored — copy it from the example and fill it in:
 
 ```json
@@ -174,7 +174,7 @@ authenticated webhook. It is gitignored — copy it from the example and fill it
 }
 ```
 
-**`job_config.json`** tracks which jobs are enabled. It is created automatically
+**`configs/job_config.json`** tracks which jobs are enabled. It is created automatically
 and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
 ```json
@@ -189,10 +189,10 @@ and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
 ```bash
 python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
-python3 test_job_management.py              # job enable/disable logic
-python3 test_log_engine.py                  # logging engine tests
-python3 test_file_upload.py                 # file upload job tests
-python3 test_notify_phone.py                # phone notification job tests
+python3 tests/test_job_management.py        # job enable/disable logic
+python3 tests/test_log_engine.py            # logging engine tests
+python3 tests/test_file_upload.py           # file upload job tests
+python3 tests/test_notify_phone.py          # phone notification job tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
 
@@ -201,7 +201,7 @@ python3 app.py --debug                      # then hit endpoints with curl
 Webhooks with `"require_secret": true`, every state-changing management
 endpoint (`/jobs/{name}/enable|disable|toggle` and
 `/logs/{type}/enable|disable|toggle`), and reading log contents
-(`/logs/{type}/read`) require the shared secret (from `webhook_secret.json`) in
+(`/logs/{type}/read`) require the shared secret (from `configs/webhook_secret.json`) in
 the `X-Webhook-Secret` header; requests without it get `401`. The remaining
 read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. Use a
 strong, random secret in production, and prefer a private network

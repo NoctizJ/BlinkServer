@@ -32,8 +32,8 @@ docker ps   # confirm the container is running
 2. **Settings → Devices & services → + Add Integration → Blink**.
 3. Generate a token: **Profile → Security → Long-lived access tokens**.
 
-Put the token and your entity ID into `home_assistant_config.json` (see the
-main [README](README.md)).
+Put the token and your entity ID into `configs/home_assistant_config.json` (see the
+main [README](../README.md)).
 
 ## 3. Verify with curl
 

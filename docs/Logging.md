@@ -70,8 +70,8 @@ The response includes `written: true|false`.
 
 A line is written only when **both** switches are on:
 
-1. **Master switch** — the `log` job in `job_config.json`. Turns *all* logging on/off.
-2. **Per-type switch** — an entry under `types` in `log_config.json`. Turns a single type on/off.
+1. **Master switch** — the `log` job in `configs/job_config.json`. Turns *all* logging on/off.
+2. **Per-type switch** — an entry under `types` in `configs/log_config.json`. Turns a single type on/off.
 
 | Master (`log`) | Type | Result     |
 | -------------- | ---- | ---------- |
@@ -79,12 +79,12 @@ A line is written only when **both** switches are on:
 | on             | off  | suppressed |
 | off            | any  | suppressed |
 
-New types are auto-registered in `log_config.json` (enabled) the first time they
+New types are auto-registered in `configs/log_config.json` (enabled) the first time they
 are logged, so you can toggle them off afterwards.
 
 ### Config files
 
-`job_config.json` — the master switch lives beside the other jobs:
+`configs/job_config.json` — the master switch lives beside the other jobs:
 
 ```json
 {
@@ -94,7 +94,7 @@ are logged, so you can toggle them off afterwards.
 }
 ```
 
-`log_config.json` — one flag per type:
+`configs/log_config.json` — one flag per type:
 
 ```json
 {
@@ -163,7 +163,7 @@ errors) under the `blink` type, giving you an audit trail in `logs/blink.log`.
 ## Testing
 
 ```bash
-python3 test_log_engine.py     # log engine unit tests (no server needed)
+python3 tests/test_log_engine.py     # log engine unit tests (no server needed)
 python3 jobs/log_engine.py     # write a few sample entries
 python3 jobs/log_webhook.py    # exercise the webhook handler directly
 ```

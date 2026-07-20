@@ -31,7 +31,7 @@ Response:
 2. Set the URL to `http://<your-server>:5050/webhook/upload`.
 3. Tap **Show More**.
 4. **Method**: `POST`.
-5. **Headers**: add `X-Webhook-Secret` = your secret (from `webhook_secret.json`).
+5. **Headers**: add `X-Webhook-Secret` = your secret (from `configs/webhook_secret.json`).
 6. **Request Body**: `Form`.
 7. Tap **Add new field → File**, name it `file`, and pick the value — e.g. a
    Photos variable, a "Shortcut Input" (for a Share Sheet shortcut), or "Take
@@ -88,5 +88,5 @@ showing what actually arrived:
 ## Testing
 
 ```bash
-python3 test_file_upload.py    # requires Flask (run in your venv)
+python3 tests/test_file_upload.py    # requires Flask (run in your venv)
 ```

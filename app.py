@@ -42,9 +42,9 @@ else:
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
-JOB_CONFIG_PATH = Path(__file__).parent / "job_config.json"
-WEBHOOK_SECRET_PATH = Path(__file__).parent / "webhook_secret.json"
+CONFIG_PATH = Path(__file__).parent / "configs" / "config.json"
+JOB_CONFIG_PATH = Path(__file__).parent / "configs" / "job_config.json"
+WEBHOOK_SECRET_PATH = Path(__file__).parent / "configs" / "webhook_secret.json"
 
 app = Flask(__name__)
 

@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import app
 import jobs.file_upload as file_upload
@@ -23,7 +23,7 @@ from jobs import log_engine
 
 
 def _secret():
-    with open("webhook_secret.json") as f:
+    with open(Path(__file__).parent.parent / "configs" / "webhook_secret.json") as f:
         return json.load(f)["WEBHOOK_SECRET"]
 
 

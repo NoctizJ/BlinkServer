@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 # Add the project root to the path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import load_job_config, save_job_config, get_job_enabled_status
 
@@ -55,7 +55,7 @@ def test_unknown_job_rejected():
     from app import app as flask_app
 
     print("\nTesting unknown-job rejection...")
-    secret_path = Path(__file__).parent / "webhook_secret.json"
+    secret_path = Path(__file__).parent.parent / "configs" / "webhook_secret.json"
     with open(secret_path) as f:
         headers = {"X-Webhook-Secret": json.load(f)["WEBHOOK_SECRET"]}
 
