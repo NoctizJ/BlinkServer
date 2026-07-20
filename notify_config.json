@@ -1,0 +1,12 @@
+{
+  "leaving_home": {
+    "title": "Leaving home",
+    "message": "The house is now armed. Have a safe trip!",
+    "arm": false
+  },
+  "arriving_home": {
+    "title": "Welcome home",
+    "message": "The alarm has been disarmed. Welcome back!",
+    "disarm": true
+  }
+}

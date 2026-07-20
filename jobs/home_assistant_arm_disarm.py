@@ -48,9 +48,114 @@ def load_config() -> Dict[str, str]:
     except Exception as e:
         raise ValueError(f"Error loading configuration: {e}")
 
+def set_alarm(action: str) -> Dict[str, Any]:
+    """Arm or disarm the Home Assistant alarm panel.
+
+    This is the reusable core of the arm/disarm job — other jobs (e.g. the
+    notifyPhone leaving/arriving handlers) import it directly.
+
+    Args:
+        action: "arm" or "disarm".
+
+    Returns:
+        dict: {"status": "success"|"error", ...} describing the outcome. HTTP
+        failures are reported in the return value; an invalid action or missing
+        configuration raises ValueError.
+    """
+    if action not in ("arm", "disarm"):
+        raise ValueError(f"Invalid action '{action}' - must be either 'arm' or 'disarm'")
+
+    # Load configuration from file
+    config = load_config()
+    ha_base_url = config["HA_BASE_URL"].rstrip("/")
+    ha_api_key = config["HA_API_KEY"]
+    ha_entity_id = config["HA_ENTITY_ID"]
+
+    # Debug logging for configuration
+    logger.debug("Configuration loaded - Base URL: %s, Entity ID: %s", ha_base_url, ha_entity_id)
+
+    # Construct the correct API endpoint for Home Assistant
+    if action == "arm":
+        api_endpoint = f"{ha_base_url}/api/services/alarm_control_panel/alarm_arm_away"
+    else:
+        api_endpoint = f"{ha_base_url}/api/services/alarm_control_panel/alarm_disarm"
+
+    # Debug logging for API endpoint
+    logger.debug("API endpoint for %s: %s", action, api_endpoint)
+
+    # Prepare headers
+    headers = {
+        "Authorization": f"Bearer {ha_api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Prepare data payload for Home Assistant
+    data = {
+        "entity_id": ha_entity_id
+    }
+
+    # Debug logging for request data
+    logger.debug("Request headers: %s", headers)
+    logger.debug("Request data: %s", data)
+
+    # Make the API call to Home Assistant
+    logger.debug("Making API request to %s", api_endpoint)
+
+    response = requests.post(
+        api_endpoint,
+        headers=headers,
+        json=data,
+        timeout=30
+    )
+
+    # Debug logging for response
+    logger.debug("API Response Status: %d", response.status_code)
+    logger.debug("API Response Text: %s", response.text)
+
+    # Check if the request was successful
+    if response.status_code == 200:
+        message = f"Successfully {action}ed the system"
+        logger.info(message)
+        write_log("blink", f"{action.upper()} event: {message} (entity: {ha_entity_id})")
+        return {
+            "message": message,
+            "status": "success"
+        }
+    else:
+        error_msg = f"HTTP {response.status_code}: {response.text}"
+        logger.error(f"Failed to {action} system: {error_msg}")
+        write_log("blink", f"{action.upper()} event FAILED: {error_msg} (entity: {ha_entity_id})")
+        return {
+            "error": f"Failed to {action} system",
+            "message": f"Error occurred while trying to {action} the system: {error_msg}",
+            "status": "error"
+        }
+
+
+def arm(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/blink/arm — arm the alarm panel.
+
+    The intent comes from the route, so no payload is required.
+    """
+    logger.debug("arm handler payload: %s", payload)
+    return set_alarm("arm")
+
+
+def disarm(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/blink/disarm — disarm the alarm panel.
+
+    The intent comes from the route, so no payload is required.
+    """
+    logger.debug("disarm handler payload: %s", payload)
+    return set_alarm("disarm")
+
+
 def run(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute arm or disarm action on Home Assistant alarm panel.
+    Execute arm or disarm based on an ``action`` field in the payload.
+
+    Retained for backward compatibility; the dedicated ``arm``/``disarm``
+    handlers above are the preferred entry points and need no payload.
 
     Args:
         payload (dict): The request payload containing the action
@@ -91,71 +196,8 @@ def run(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "message": error_msg
             }
 
-        # Load configuration from file
-        config = load_config()
-        ha_base_url = config["HA_BASE_URL"]
-        ha_api_key = config["HA_API_KEY"]
-        ha_entity_id = config["HA_ENTITY_ID"]
-
-        # Debug logging for configuration
-        logger.debug("Configuration loaded - Base URL: %s, Entity ID: %s", ha_base_url, ha_entity_id)
-
-        # Construct the correct API endpoint for Home Assistant
-        if action == "arm":
-            api_endpoint = f"{ha_base_url}/api/services/alarm_control_panel/alarm_arm_away"
-        elif action == "disarm":
-            api_endpoint = f"{ha_base_url}/api/services/alarm_control_panel/alarm_disarm"
-
-        # Debug logging for API endpoint
-        logger.debug("API endpoint for %s: %s", action, api_endpoint)
-
-        # Prepare headers
-        headers = {
-            "Authorization": f"Bearer {ha_api_key}",
-            "Content-Type": "application/json"
-        }
-
-        # Prepare data payload for Home Assistant
-        data = {
-            "entity_id": ha_entity_id
-        }
-
-        # Debug logging for request data
-        logger.debug("Request headers: %s", headers)
-        logger.debug("Request data: %s", data)
-
-        # Make the API call to Home Assistant
-        logger.debug("Making API request to %s", api_endpoint)
-
-        response = requests.post(
-            api_endpoint,
-            headers=headers,
-            json=data,
-            timeout=30
-        )
-
-        # Debug logging for response
-        logger.debug("API Response Status: %d", response.status_code)
-        logger.debug("API Response Text: %s", response.text)
-
-        # Check if the request was successful
-        if response.status_code == 200:
-            message = f"Successfully {action}ed the system"
-            logger.info(message)
-            write_log("blink", f"{action.upper()} event: {message} (entity: {ha_entity_id})")
-            return {
-                "message": message,
-                "status": "success"
-            }
-        else:
-            error_msg = f"HTTP {response.status_code}: {response.text}"
-            logger.error(f"Failed to {action} system: {error_msg}")
-            write_log("blink", f"{action.upper()} event FAILED: {error_msg} (entity: {ha_entity_id})")
-            return {
-                "error": f"Failed to {action} system",
-                "message": f"Error occurred while trying to {action} the system: {error_msg}",
-                "status": "error"
-            }
+        # Delegate to the reusable arm/disarm core.
+        return set_alarm(action)
 
     except Exception as e:
         error_msg = str(e)
