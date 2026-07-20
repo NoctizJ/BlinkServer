@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
 
 logger = logging.getLogger(__name__)
 
-NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "notify_config.json")
+NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "notify_config.json")
 
 # The alarm action associated with each event, and its config-flag key.
 EVENT_ACTIONS = {"leaving_home": "arm", "arriving_home": "disarm"}

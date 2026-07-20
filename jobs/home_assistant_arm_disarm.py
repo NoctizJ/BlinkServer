@@ -27,7 +27,7 @@ def load_config() -> Dict[str, str]:
     Returns:
         dict: Configuration dictionary with HA_BASE_URL, HA_API_KEY, and HA_ENTITY_ID
     """
-    config_file = os.path.join(os.path.dirname(__file__), "..", "home_assistant_config.json")
+    config_file = os.path.join(os.path.dirname(__file__), "..", "configs", "home_assistant_config.json")
 
     try:
         with open(config_file, 'r') as f:

@@ -23,7 +23,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "home_assistant_config.json")
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "home_assistant_config.json")
 
 
 def _load_ha_config() -> Dict[str, str]:

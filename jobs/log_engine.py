@@ -33,8 +33,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
 
-JOB_CONFIG_PATH = REPO_ROOT / "job_config.json"
-LOG_CONFIG_PATH = REPO_ROOT / "log_config.json"
+JOB_CONFIG_PATH = REPO_ROOT / "configs" / "job_config.json"
+LOG_CONFIG_PATH = REPO_ROOT / "configs" / "log_config.json"
 
 # Fallback type used when a caller passes None / an empty type.
 DEFAULT_TYPE = "default"
