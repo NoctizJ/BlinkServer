@@ -39,6 +39,26 @@ Fill in your values:
 
 > `home_assistant_config.json` holds a secret token and is gitignored — never commit it.
 
+`HA_NOTIFY_TARGET` (e.g. `mobile_app_aisingioro`) is only needed for the phone
+notification webhooks (`/webhook/notify/*`); it names the Home Assistant
+`notify` service target for your phone. The notification titles and messages are
+configurable in **`notify_config.json`**, which also controls whether each
+event arms/disarms the alarm panel:
+
+```json
+{
+    "leaving_home":  { "title": "Leaving home", "message": "The house is now armed.", "arm": true },
+    "arriving_home": { "title": "Welcome home", "message": "The alarm has been disarmed.", "disarm": true }
+}
+```
+
+- `arm` / `disarm` — when `true`, leaving also arms the panel and arriving also
+  disarms it (reusing the same Home Assistant panel as `/webhook/blink/*`). Set
+  to `false` to notify only.
+- Each request may also override `title`, `message`, and the `arm`/`disarm` flag
+  in its JSON body (payload wins over `notify_config.json`, which wins over the
+  built-in defaults).
+
 Then set the shared webhook secret:
 
 ```bash
@@ -79,6 +99,8 @@ ports, see [TAILSCALE_SETUP.md](TAILSCALE_SETUP.md).
 | POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](Logging.md)) |
 | POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](Uploads.md)) 🔒 |
+| POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home 🔒 |
+| POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
@@ -109,6 +131,16 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
   -d '{"action": "disarm"}'
+
+# Notify your phone (title/message default to notify_config.json; override per request)
+curl -X POST http://localhost:5050/webhook/notify/leaving \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here"
+
+curl -X POST http://localhost:5050/webhook/notify/arriving \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"title": "Welcome back", "message": "Kettle is on"}'
 
 # Toggle a job or log type (secret required)
 curl -X POST http://localhost:5050/jobs/log/toggle \
@@ -164,6 +196,7 @@ python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
 python3 test_job_management.py              # job enable/disable logic
 python3 test_log_engine.py                  # logging engine tests
 python3 test_file_upload.py                 # file upload job tests
+python3 test_notify_phone.py                # phone notification job tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
 

@@ -23,6 +23,18 @@
       "module": "jobs.file_upload",
       "function": "run",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/notify/leaving",
+      "module": "jobs.notify_phone",
+      "function": "leaving_home",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/notify/arriving",
+      "module": "jobs.notify_phone",
+      "function": "arriving_home",
+      "require_secret": true
     }
   ]
 }
