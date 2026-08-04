@@ -95,13 +95,13 @@ Leaving sets `"away"`, arriving sets `"home"`. Other jobs can read or write it
 through `jobs/presence_state.py` (`resolve_person`, `get_state`, `all_states`,
 `set_state`).
 
-The store is also reachable over HTTP. Reading is available as a plain **GET**;
-writing is a POST webhook. Both need the secret header:
+The store is also reachable over HTTP. Reading is a plain **GET** that returns
+just the formatted text (like `/logs/{type}/read`); writing is a POST webhook.
+Both need the secret header:
 
 ```bash
-# Who's home, who's not — GET, formatted for display
-curl -H "X-Webhook-Secret: your-shared-secret-here" \
-  "http://localhost:5050/presence?format=text"
+# Who's home, who's not
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/presence
 ```
 
 ```text
@@ -115,14 +115,13 @@ Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
 ```
 
 ```bash
-# Same data as JSON (the formatted text is always in "message")
-curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/presence
-# -> {"status":"ok","count":2,"home":["娜"],"away":["Alex"],"people":{…},"message":"Presence — 2 people\n…"}
-
 # One person
-curl -H "X-Webhook-Secret: your-shared-secret-here" \
-  "http://localhost:5050/presence?id=Alex&format=text"
+curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?id=Alex"
 # -> Alex is away since 2026-08-03 20:04:55.545 (leaving_home)
+
+# Structured form, when you want the values rather than the text
+curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?format=json"
+# -> {"status":"ok","count":2,"home":["娜"],"away":["Alex"],"people":{…},"message":"Presence — 2 people\n…"}
 
 # The same reader as a POST webhook, for callers that prefer a JSON body
 curl -X POST http://localhost:5050/webhook/presence/read \
@@ -136,12 +135,12 @@ curl -X POST http://localhost:5050/webhook/presence/write \
   -d '{"id": "Alex", "state": "home"}'
 ```
 
-- `GET /presence` — `?id=<person>` for one person, `?format=text` for the
-  formatted summary instead of JSON. Also accepts POST with the same fields in a
-  JSON body.
-- `read` — no `id` returns everyone plus `home`/`away` name lists; an `id`
-  returns just that person (`presence`/`state` are `null` if never seen). Every
-  read includes `message`, the display-ready text.
+- `GET /presence` — plain text by default; `?id=<person>` for one person,
+  `?format=json` for the structured payload. Also accepts POST with the same
+  fields in a JSON body.
+- `read` (the webhook) — no `id` returns everyone plus `home`/`away` name lists;
+  an `id` returns just that person (`presence`/`state` are `null` if never seen).
+  Every read includes `message`, the display-ready text.
 - `write` — requires `state`; `id` defaults to `娜` and `event` defaults to
   `manual_write`. `state` accepts `home`/`in`/`true` and
   `away`/`left`/`out`/`not_home`/`false`.
@@ -197,7 +196,7 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home; `{"id": "<person>"}` 🔒 |
 | POST   | `/webhook/presence/read`      | Read who's home / away, JSON body (see [Who left / arrived](#who-left--arrived)) 🔒 |
 | POST   | `/webhook/presence/write`     | Set a person's home/away state by hand 🔒 |
-| GET    | `/presence`                   | Read who's home / away; `?id=`, `?format=text` 🔒 |
+| GET    | `/presence`                   | Read who's home / away as text; `?id=`, `?format=json` 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |

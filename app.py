@@ -344,20 +344,20 @@ def read_log_type(log_type):
 @app.route("/presence", methods=["GET", "POST"])
 @require_webhook_secret
 def presence():
-    """Return who is home and who is away.
+    """Return who is home and who is away as plain text.
 
-    Use `?id=<person>` for a single person, and `?format=text` for the
-    formatted plain-text summary instead of JSON (the same text is always in
-    the JSON `message` field).
+    Mirrors `/logs/<type>/read`: the body is just the formatted summary, ready
+    to display. Use `?id=<person>` for a single person, and `?format=json` for
+    the structured payload (counts, home/away lists, raw entries) instead.
     """
     body = request.get_json(silent=True) or {}
     person = request.args.get("id") or body.get("id")
     result = read_presence({"id": person} if person else {})
 
     fmt = (request.args.get("format") or body.get("format") or "").lower()
-    if fmt == "text":
-        return Response(result["message"] + "\n", mimetype="text/plain")
-    return jsonify(result)
+    if fmt == "json":
+        return jsonify(result)
+    return Response(result["message"] + "\n", mimetype="text/plain")
 
 
 config = load_config()
