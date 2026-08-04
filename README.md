@@ -12,6 +12,8 @@ server code.
 - Enable/disable jobs at runtime via the API
 - Structured, searchable logging with master + per-type switches — see [Logging.md](docs/Logging.md)
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
+- Per-person home/away presence, persisted in `state/presence.json` and readable
+  over HTTP (`/webhook/presence/read`)
 
 ## Installation
 
@@ -47,17 +49,109 @@ event arms/disarms the alarm panel:
 
 ```json
 {
-    "leaving_home":  { "title": "Leaving home", "message": "The house is now armed.", "arm": true },
-    "arriving_home": { "title": "Welcome home", "message": "The alarm has been disarmed.", "disarm": true }
+    "leaving_home":  { "title": "Leaving home", "message": "{id} has left home.", "arm": true },
+    "arriving_home": { "title": "Welcome home", "message": "{id} is home. The alarm has been disarmed.", "disarm": true }
 }
 ```
 
 - `arm` / `disarm` — when `true`, leaving also arms the panel and arriving also
   disarms it (reusing the same Home Assistant panel as `/webhook/blink/*`). Set
   to `false` to notify only.
+- `{id}` (or `{name}`) in a title/message is replaced with the person's name —
+  see [Who left / arrived](#who-left--arrived) below.
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
   in its JSON body (payload wins over `configs/notify_config.json`, which wins over the
   built-in defaults).
+
+### Who left / arrived
+
+`/webhook/notify/leaving` and `/webhook/notify/arriving` read the person's
+identity from an **`id`** field in the JSON body:
+
+```bash
+curl -X POST http://localhost:5050/webhook/notify/leaving \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex"}'
+```
+
+A post with no `id` (or a blank one) is attributed to **`娜`**.
+
+Each event is persisted per person in **`state/presence.json`**, so the current
+home/away state survives restarts. The file is created automatically and is
+gitignored (it is runtime state):
+
+```json
+{
+    "people": {
+        "娜":  { "state": "home", "event": "arriving_home", "last_updated": "2026-08-03 18:42:11.482" },
+        "Alex": { "state": "away", "event": "leaving_home",  "last_updated": "2026-08-03 08:07:53.119" }
+    },
+    "last_modified": "2026-08-03 18:42:11.482"
+}
+```
+
+Leaving sets `"away"`, arriving sets `"home"`. Other jobs can read or write it
+through `jobs/presence_state.py` (`resolve_person`, `get_state`, `all_states`,
+`set_state`).
+
+The store is also reachable over HTTP. Reading is available as a plain **GET**;
+writing is a POST webhook. Both need the secret header:
+
+```bash
+# Who's home, who's not — GET, formatted for display
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/presence?format=text"
+```
+
+```text
+Presence — 2 people
+----------------------------------------------------------
+Home (1): 娜
+Away (1): Alex
+
+Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
+娜    home  since 2026-08-03 20:04:55.546  (arriving_home)
+```
+
+```bash
+# Same data as JSON (the formatted text is always in "message")
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/presence
+# -> {"status":"ok","count":2,"home":["娜"],"away":["Alex"],"people":{…},"message":"Presence — 2 people\n…"}
+
+# One person
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/presence?id=Alex&format=text"
+# -> Alex is away since 2026-08-03 20:04:55.545 (leaving_home)
+
+# The same reader as a POST webhook, for callers that prefer a JSON body
+curl -X POST http://localhost:5050/webhook/presence/read \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" -d '{"id": "Alex"}'
+
+# Set a state by hand (seed the store, or fix a missed leaving/arriving webhook)
+curl -X POST http://localhost:5050/webhook/presence/write \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex", "state": "home"}'
+```
+
+- `GET /presence` — `?id=<person>` for one person, `?format=text` for the
+  formatted summary instead of JSON. Also accepts POST with the same fields in a
+  JSON body.
+- `read` — no `id` returns everyone plus `home`/`away` name lists; an `id`
+  returns just that person (`presence`/`state` are `null` if never seen). Every
+  read includes `message`, the display-ready text.
+- `write` — requires `state`; `id` defaults to `娜` and `event` defaults to
+  `manual_write`. `state` accepts `home`/`in`/`true` and
+  `away`/`left`/`out`/`not_home`/`false`.
+- The two `/webhook/presence/*` paths are the single `presence_webhook` job, so
+  `POST /jobs/presence_webhook/disable` turns the pair off. `GET /presence` is a
+  management endpoint (like `/logs/{type}/read`) and is not affected by that
+  switch.
+- Nothing here arms or disarms the alarm panel — `presence/write` is bookkeeping
+  only. The panel is changed by `/webhook/blink/*` and, when enabled in
+  `configs/notify_config.json`, by `/webhook/notify/*`.
 
 Then set the shared webhook secret:
 
@@ -99,8 +193,11 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](docs/Logging.md)) |
 | POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](docs/Uploads.md)) 🔒 |
-| POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home 🔒 |
-| POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home 🔒 |
+| POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home; `{"id": "<person>"}` 🔒 |
+| POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home; `{"id": "<person>"}` 🔒 |
+| POST   | `/webhook/presence/read`      | Read who's home / away, JSON body (see [Who left / arrived](#who-left--arrived)) 🔒 |
+| POST   | `/webhook/presence/write`     | Set a person's home/away state by hand 🔒 |
+| GET    | `/presence`                   | Read who's home / away; `?id=`, `?format=text` 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
@@ -129,14 +226,16 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "X-Webhook-Secret: your-shared-secret-here"
 
 # Notify your phone (title/message default to configs/notify_config.json; override per request)
+# "id" names who left/arrived and is recorded in state/presence.json (defaults to "娜")
 curl -X POST http://localhost:5050/webhook/notify/leaving \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: your-shared-secret-here"
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex"}'
 
 curl -X POST http://localhost:5050/webhook/notify/arriving \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
-  -d '{"title": "Welcome back", "message": "Kettle is on"}'
+  -d '{"id": "Alex", "title": "Welcome back", "message": "Kettle is on, {id}"}'
 
 # Toggle a job or log type (secret required)
 curl -X POST http://localhost:5050/jobs/log/toggle \
@@ -193,6 +292,7 @@ python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
 python3 tests/test_notify_phone.py          # phone notification job tests
+python3 tests/test_presence_webhook.py      # presence read/write webhook tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
 
@@ -200,8 +300,9 @@ python3 app.py --debug                      # then hit endpoints with curl
 
 Webhooks with `"require_secret": true`, every state-changing management
 endpoint (`/jobs/{name}/enable|disable|toggle` and
-`/logs/{type}/enable|disable|toggle`), and reading log contents
-(`/logs/{type}/read`) require the shared secret (from `configs/webhook_secret.json`) in
+`/logs/{type}/enable|disable|toggle`), reading log contents
+(`/logs/{type}/read`), and reading presence (`GET /presence`) require the shared
+secret (from `configs/webhook_secret.json`) in
 the `X-Webhook-Secret` header; requests without it get `401`. The remaining
 read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. Use a
 strong, random secret in production, and prefer a private network

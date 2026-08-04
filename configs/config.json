@@ -41,6 +41,18 @@
       "module": "jobs.notify_phone",
       "function": "arriving_home",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/presence/read",
+      "module": "jobs.presence_webhook",
+      "function": "read",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/presence/write",
+      "module": "jobs.presence_webhook",
+      "function": "write",
+      "require_secret": true
     }
   ]
 }
