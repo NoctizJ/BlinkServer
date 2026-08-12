@@ -89,11 +89,74 @@ def test_config_precedence():
         title, message = sent.call_args[0]
         assert title and message, (title, message)
 
-        # Payload overrides win.
+        # Payload overrides win (the title still gets the arm/disarm postfix).
         sent.reset_mock()
         np.arriving_home({"title": "Custom", "message": "Overridden"})
-        assert sent.call_args[0] == ("Custom", "Overridden"), sent.call_args[0]
+        assert sent.call_args[0] == ("Custom (D)", "Overridden"), sent.call_args[0]
     print("  OK: config values used, payload overrides win")
+
+
+def test_title_postfix_tracks_who_is_left_at_home():
+    """The title ends in "(A)" when everybody is away, "(D)" when somebody is home."""
+    print("Testing the (A)/(D) title postfix...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        # Empty store: the first arrival puts somebody home -> disarm.
+        res = np.arriving_home({"id": "Alex", "title": "Arriving home"})
+        assert sent.call_args[0][0] == "Arriving home (D)", sent.call_args[0]
+        assert res["title"] == "Arriving home (D)", res
+
+        # Sam arrives too, so Alex leaving still leaves somebody in -> disarm.
+        np.arriving_home({"id": "Sam"})
+        res = np.leaving_home({"id": "Alex", "title": "Leaving home"})
+        assert sent.call_args[0][0] == "Leaving home (D)", sent.call_args[0]
+        assert res["title"] == "Leaving home (D)", res
+
+        # Sam is the last one out -> arm.
+        res = np.leaving_home({"id": "Sam", "title": "Leaving home"})
+        assert sent.call_args[0][0] == "Leaving home (A)", sent.call_args[0]
+        assert res["title"] == "Leaving home (A)", res
+
+        # ...and their arrival flips it straight back to disarm.
+        np.arriving_home({"id": "Sam", "title": "Arriving home"})
+        assert sent.call_args[0][0] == "Arriving home (D)", sent.call_args[0]
+    print("  OK: (A) when the house empties, (D) while anyone is home")
+
+
+def test_postfix_uses_this_events_state_not_just_the_store():
+    """The postfix reflects the household *after* the event, even before it is
+    written — a lone person leaving arms, arriving disarms."""
+    print("Testing the postfix against the event's own state...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "write_log"):
+        ps.set_state("Alex", ps.STATE_HOME, event="arriving_home")
+        # Alex is the only one home, so their leaving empties the house.
+        assert np._title_postfix("leaving_home", "Alex") == np.POSTFIX_ARM
+        assert np._title_postfix("arriving_home", "Alex") == np.POSTFIX_DISARM
+
+        # Somebody else being home keeps it disarmed whoever leaves.
+        ps.set_state("Sam", ps.STATE_HOME, event="arriving_home")
+        assert np._title_postfix("leaving_home", "Alex") == np.POSTFIX_DISARM
+
+        # An event with no presence of its own gets no postfix.
+        assert np._title_postfix("some_other_event", "Alex") == ""
+    print("  OK: postfix computed from the post-event household state")
+
+
+def test_postfix_survives_an_unreadable_presence_store():
+    """A presence store that cannot be read costs the postfix, not the notification."""
+    print("Testing postfix fallback on a presence failure...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "anyone_home", side_effect=OSError("disk gone")), \
+            mock.patch.object(np, "write_log"):
+        res = np.leaving_home({"title": "Leaving home"})
+        assert sent.call_args[0][0] == "Leaving home", sent.call_args[0]
+        assert res["notify"]["status"] == "success", res
+    print("  OK: unreadable store -> plain title, notification still sent")
 
 
 def test_leaving_arms_arriving_disarms():
@@ -184,6 +247,8 @@ def test_presence_is_persisted_per_person():
         assert people[ps.DEFAULT_PERSON]["state"] == ps.STATE_HOME, people
         assert ps.get_state("Alex")["last_updated"], people
         assert ps.get_state("nobody") is None
+        assert ps.anyone_home() is True
+        assert ps.anyone_home({"Alex": ps.STATE_AWAY, ps.DEFAULT_PERSON: ps.STATE_AWAY}) is False
     print("  OK: each person's home/away state persisted to presence.json")
 
 
@@ -209,6 +274,9 @@ if __name__ == "__main__":
     test_wrapper_posts_to_notify_service()
     test_http_failure_is_reported_not_raised()
     test_config_precedence()
+    test_title_postfix_tracks_who_is_left_at_home()
+    test_postfix_uses_this_events_state_not_just_the_store()
+    test_postfix_survives_an_unreadable_presence_store()
     test_leaving_arms_arriving_disarms()
     test_alarm_can_be_disabled_by_config()
     test_id_defaults_to_default_person()

@@ -14,6 +14,8 @@ server code.
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 - Per-person home/away presence, persisted in `state/presence.json` and readable
   over HTTP (`/webhook/presence/read`)
+- Leaving/arriving notification titles postfixed `(A)`/`(D)` for arm/disarm,
+  depending on whether anyone is still home — see [Arm/disarm postfix](#armdisarm-postfix)
 
 ## Installation
 
@@ -59,9 +61,35 @@ event arms/disarms the alarm panel:
   to `false` to notify only.
 - `{id}` (or `{name}`) in a title/message is replaced with the person's name —
   see [Who left / arrived](#who-left--arrived) below.
+- Every title also ends in an **arm/disarm postfix** — see
+  [Arm/disarm postfix](#armdisarm-postfix).
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
   in its JSON body (payload wins over `configs/notify_config.json`, which wins over the
   built-in defaults).
+
+### Arm/disarm postfix
+
+Whenever a leaving or arriving webhook fires, the notification title gets a
+postfix describing the household **after** that event:
+
+| Postfix | Meaning | When                                      |
+| ------- | ------- | ----------------------------------------- |
+| `(A)`   | arm     | everyone's presence is `away`             |
+| `(D)`   | disarm  | at least one person is still `home`       |
+
+```text
+Leaving home (D)     # somebody is still in the house
+Leaving home (A)     # that was the last person out
+Welcome home (D)     # arriving always leaves somebody home
+```
+
+The postfix is appended whatever the title's source (payload, config, or
+built-in default), and is computed from `state/presence.json` with the current
+event's own state applied on top — so the last person leaving gets `(A)` even
+though the store is only written afterwards. It is a label for your automations
+and notifications; it does not itself arm or disarm the panel (the `arm` /
+`disarm` flags above do that). If the presence store cannot be read, the title
+is sent without a postfix rather than failing the notification.
 
 ### Who left / arrived
 
@@ -93,7 +121,7 @@ gitignored (it is runtime state):
 
 Leaving sets `"away"`, arriving sets `"home"`. Other jobs can read or write it
 through `jobs/presence_state.py` (`resolve_person`, `get_state`, `all_states`,
-`set_state`).
+`anyone_home`, `set_state`).
 
 The store is also reachable over HTTP. Reading is a plain **GET** that returns
 just the formatted text (like `/logs/{type}/read`); writing is a POST webhook.
