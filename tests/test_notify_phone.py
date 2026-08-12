@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Tests for the notifyPhone job (jobs/notify_phone.py) and its Home Assistant
-notification wrapper (jobs/home_assistant_notify.py).
+"""Tests for the notifyPhone job (jobs/notify_phone.py), its Home Assistant
+notification wrapper (jobs/home_assistant_notify.py), and the presence state
+store (jobs/presence_state.py).
 
-These tests mock out the HTTP call and the logging engine, so no real Home
-Assistant request is made and nothing is written to the repo:
+These tests mock out the HTTP call and the logging engine, and redirect the
+presence file to a temp dir, so no real Home Assistant request is made and
+nothing is written to the repo:
 
     python3 test_notify_phone.py
 """
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -16,12 +19,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import jobs.home_assistant_notify as han
 import jobs.notify_phone as np
+import jobs.presence_state as ps
 
 FAKE_HA_CONFIG = {
     "HA_BASE_URL": "http://host:8123",
     "HA_API_KEY": "test-token",
     "HA_NOTIFY_TARGET": "mobile_app_aisingioro",
 }
+
+
+class temp_presence_file:
+    """Context manager pointing the presence store at a temp file."""
+
+    def __enter__(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        directory = Path(self._tmp.name)
+        self._patches = [
+            mock.patch.object(ps, "STATE_DIR", directory),
+            mock.patch.object(ps, "STATE_FILE", directory / "presence.json"),
+        ]
+        for patch in self._patches:
+            patch.start()
+        return ps.STATE_FILE
+
+    def __exit__(self, *exc):
+        for patch in reversed(self._patches):
+            patch.stop()
+        self._tmp.cleanup()
+        return False
 
 
 def test_wrapper_posts_to_notify_service():
@@ -55,7 +80,8 @@ def test_http_failure_is_reported_not_raised():
 def test_config_precedence():
     """Resolution precedence is payload > notify_config.json > default."""
     print("Testing notifyPhone title/message resolution...")
-    with mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
             mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
             mock.patch.object(np, "write_log"):
         # From notify_config.json (defaults shipped in the repo).
@@ -77,7 +103,8 @@ def test_leaving_arms_arriving_disarms():
     of the current notify_config.json values.
     """
     print("Testing arm-on-leaving / disarm-on-arriving...")
-    with mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
             mock.patch.object(np, "set_alarm", return_value={"status": "success"}) as alarm, \
             mock.patch.object(np, "write_log"):
         res = np.leaving_home({"arm": True})
@@ -95,7 +122,8 @@ def test_alarm_can_be_disabled_by_config():
     """An explicit false flag (via payload here) skips the alarm action but
     still sends the notification."""
     print("Testing arm/disarm disable flag...")
-    with mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
             mock.patch.object(np, "set_alarm") as alarm, \
             mock.patch.object(np, "write_log"):
         res = np.leaving_home({"arm": False})
@@ -105,10 +133,86 @@ def test_alarm_can_be_disabled_by_config():
     print("  OK: arm disabled -> set_alarm skipped, notification still sent")
 
 
+def test_id_defaults_to_default_person():
+    """A payload without "id" is attributed to the default person."""
+    print("Testing the id payload key...")
+    assert ps.resolve_person({"id": "Alex"}) == "Alex"
+    assert ps.resolve_person({"id": "  Alex  "}) == "Alex"
+    assert ps.resolve_person({"id": ""}) == ps.DEFAULT_PERSON
+    assert ps.resolve_person({}) == ps.DEFAULT_PERSON
+    assert ps.resolve_person(None) == ps.DEFAULT_PERSON
+    assert ps.DEFAULT_PERSON == "娜"
+    print("  OK: id read from the payload, missing/blank falls back to 娜")
+
+
+def test_id_fills_message_placeholder():
+    """"{id}" in a title/message is replaced with the person's name."""
+    print("Testing {id} placeholder substitution...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        res = np.arriving_home({"id": "Alex", "message": "{id} just walked in"})
+        assert sent.call_args[0][1] == "Alex just walked in", sent.call_args[0]
+        assert res["person"] == "Alex"
+
+        # No id -> the default person's name is substituted instead.
+        sent.reset_mock()
+        np.arriving_home({"message": "{id} just walked in"})
+        assert sent.call_args[0][1] == f"{ps.DEFAULT_PERSON} just walked in", sent.call_args[0]
+    print("  OK: {id} replaced with the person's name")
+
+
+def test_presence_is_persisted_per_person():
+    """Leaving marks a person away, arriving marks them home, in the JSON file."""
+    print("Testing presence persistence...")
+    with temp_presence_file() as state_file, \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        res = np.leaving_home({"id": "Alex"})
+        assert res["presence"]["state"] == ps.STATE_AWAY, res["presence"]
+        assert res["presence"]["event"] == "leaving_home", res["presence"]
+
+        np.arriving_home({})  # no id -> 娜
+        np.leaving_home({"id": "Alex"})
+        np.arriving_home({"id": "Alex"})
+
+        assert state_file.exists(), state_file
+        people = ps.all_states()
+        assert people["Alex"]["state"] == ps.STATE_HOME, people
+        assert people[ps.DEFAULT_PERSON]["state"] == ps.STATE_HOME, people
+        assert ps.get_state("Alex")["last_updated"], people
+        assert ps.get_state("nobody") is None
+    print("  OK: each person's home/away state persisted to presence.json")
+
+
+def test_presence_store_survives_a_corrupt_file():
+    """A malformed presence file is reported and replaced, not fatal."""
+    print("Testing presence store recovery from a bad file...")
+    with temp_presence_file() as state_file:
+        state_file.write_text("{not json", encoding="utf-8")
+        assert ps.load_state() == {"people": {}, "last_modified": None}
+        ps.set_state("Alex", ps.STATE_HOME, event="arriving_home")
+        assert ps.get_state("Alex")["state"] == ps.STATE_HOME
+
+        try:
+            ps.set_state("Alex", "elsewhere")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError for an invalid presence")
+    print("  OK: corrupt file recovered, invalid presence rejected")
+
+
 if __name__ == "__main__":
     test_wrapper_posts_to_notify_service()
     test_http_failure_is_reported_not_raised()
     test_config_precedence()
     test_leaving_arms_arriving_disarms()
     test_alarm_can_be_disabled_by_config()
+    test_id_defaults_to_default_person()
+    test_id_fills_message_placeholder()
+    test_presence_is_persisted_per_person()
+    test_presence_store_survives_a_corrupt_file()
     print("\nAll notifyPhone tests passed!")

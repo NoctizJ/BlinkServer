@@ -25,6 +25,7 @@ from jobs.log_engine import (
     read_log,
     MASTER_SWITCH,
 )
+from jobs.presence_webhook import read as read_presence
 
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
@@ -47,6 +48,10 @@ JOB_CONFIG_PATH = Path(__file__).parent / "configs" / "job_config.json"
 WEBHOOK_SECRET_PATH = Path(__file__).parent / "configs" / "webhook_secret.json"
 
 app = Flask(__name__)
+
+# Keep non-ASCII names (e.g. "娜") readable in JSON responses instead of being
+# escaped as \u5a1c.
+app.json.ensure_ascii = False
 
 
 def load_config():
@@ -329,6 +334,30 @@ def read_log_type(log_type):
     if not text:
         text = f"(no log entries for '{log_type}')\n"
     return Response(text, mimetype="text/plain")
+
+
+# Presence endpoint
+#
+# The same reader as POST /webhook/presence/read, exposed over GET so tools that
+# only issue GETs (dashboards, REST sensors, shortcuts) can display who is home.
+# Writing a state stays POST-only, on /webhook/presence/write.
+@app.route("/presence", methods=["GET", "POST"])
+@require_webhook_secret
+def presence():
+    """Return who is home and who is away as plain text.
+
+    Mirrors `/logs/<type>/read`: the body is just the formatted summary, ready
+    to display. Use `?id=<person>` for a single person, and `?format=json` for
+    the structured payload (counts, home/away lists, raw entries) instead.
+    """
+    body = request.get_json(silent=True) or {}
+    person = request.args.get("id") or body.get("id")
+    result = read_presence({"id": person} if person else {})
+
+    fmt = (request.args.get("format") or body.get("format") or "").lower()
+    if fmt == "json":
+        return jsonify(result)
+    return Response(result["message"] + "\n", mimetype="text/plain")
 
 
 config = load_config()

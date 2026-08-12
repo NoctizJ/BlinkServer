@@ -14,6 +14,13 @@ Each webhook does two things:
      ("arm" for leaving_home, "disarm" for arriving_home).
   2. Pushes a notification to the phone through the shared
      jobs.home_assistant_notify.notify_phone() wrapper.
+  3. Records who left/arrived in the presence store
+     (state/presence.json, via jobs.presence_state).
+
+The person is taken from the payload's "id" field; a post without an "id" is
+attributed to jobs.presence_state.DEFAULT_PERSON ("娜"). Titles and messages
+may contain a "{id}" (or "{name}") placeholder, which is replaced with that
+person's name.
 
 The title/message (and the arm/disarm flags) for each event are configurable
 in notify_config.json. An incoming webhook payload may also override "title",
@@ -31,10 +38,22 @@ try:
     from jobs.home_assistant_notify import notify_phone
     from jobs.home_assistant_arm_disarm import set_alarm
     from jobs.log_engine import log as write_log
+    from jobs.presence_state import (
+        STATE_AWAY,
+        STATE_HOME,
+        resolve_person,
+        set_state,
+    )
 except ImportError:  # pragma: no cover - allows running this file directly
     from home_assistant_notify import notify_phone
     from home_assistant_arm_disarm import set_alarm
     from log_engine import log as write_log
+    from presence_state import (
+        STATE_AWAY,
+        STATE_HOME,
+        resolve_person,
+        set_state,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +62,37 @@ NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "n
 # The alarm action associated with each event, and its config-flag key.
 EVENT_ACTIONS = {"leaving_home": "arm", "arriving_home": "disarm"}
 
+# The presence each event puts the person in.
+EVENT_STATES = {"leaving_home": STATE_AWAY, "arriving_home": STATE_HOME}
+
+# Placeholders in a title/message that are replaced with the person's name.
+ID_PLACEHOLDERS = ("{id}", "{name}")
+
 # Fallbacks used when notify_config.json is missing or lacks an event's entry.
 DEFAULT_MESSAGES = {
-    "leaving_home": {"title": "Leaving home", "message": "You have left home.", "arm": True},
-    "arriving_home": {"title": "Arriving home", "message": "You have arrived home.", "disarm": True},
+    "leaving_home": {"title": "Leaving home", "message": "{id} has left home.", "arm": True},
+    "arriving_home": {"title": "Arriving home", "message": "{id} has arrived home.", "disarm": True},
 }
+
+
+def _fill_person(text: Any, person: str) -> str:
+    """Replace the "{id}"/"{name}" placeholders in text with the person's name.
+
+    Done with plain replacement rather than str.format() so stray braces in a
+    configured message can never raise.
+    """
+    text = str(text)
+    for placeholder in ID_PLACEHOLDERS:
+        text = text.replace(placeholder, person)
+    return text
 
 
 def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve the title/message and arm/disarm flag for an event.
 
-    Precedence: request payload > notify_config.json > built-in default.
+    Precedence: request payload > notify_config.json > built-in default. The
+    resolved title/message have their "{id}" placeholder filled in with the
+    person named by the payload's "id" field.
     """
     defaults = DEFAULT_MESSAGES.get(event, {"title": "Notification", "message": ""})
     action = EVENT_ACTIONS.get(event)  # "arm", "disarm", or None
@@ -68,9 +107,15 @@ def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         logger.error("Invalid JSON in notify_config.json: %s", e)
 
     payload = payload if isinstance(payload, dict) else {}
+    person = resolve_person(payload)
     resolved: Dict[str, Any] = {
-        "title": payload.get("title") or file_cfg.get("title") or defaults["title"],
-        "message": payload.get("message") or file_cfg.get("message") or defaults["message"],
+        "person": person,
+        "title": _fill_person(
+            payload.get("title") or file_cfg.get("title") or defaults["title"], person
+        ),
+        "message": _fill_person(
+            payload.get("message") or file_cfg.get("message") or defaults["message"], person
+        ),
     }
 
     # Arm/disarm flag: first source that mentions it wins (payload > file >
@@ -88,10 +133,11 @@ def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _run_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Optionally arm/disarm the panel, then send the phone notification."""
+    """Optionally arm/disarm the panel, notify the phone, record the presence."""
     cfg = _load_event_config(event, payload)
+    person = cfg["person"]
     action = EVENT_ACTIONS.get(event)  # "arm" or "disarm"
-    result: Dict[str, Any] = {"event": event}
+    result: Dict[str, Any] = {"event": event, "person": person}
 
     # 1. Arm (leaving) or disarm (arriving) the alarm panel, gated by config.
     if action and cfg.get(action):
@@ -114,25 +160,48 @@ def _run_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         error_msg = str(e)
         logger.error("notify_phone failed for %s: %s", event, error_msg)
-        write_log("blink", f"NOTIFY {event} ERROR: {error_msg}")
+        write_log("blink", f"NOTIFY {event} ({person}) ERROR: {error_msg}")
         result["notify"] = {"status": "error", "error": "Notification failed", "message": error_msg}
+
+    # 3. Persist whether this person is now home or away.
+    presence = EVENT_STATES.get(event)
+    if presence:
+        try:
+            result["presence"] = set_state(person, presence, event=event)
+        except Exception as e:
+            error_msg = str(e)
+            logger.error("presence update failed for %s (%s): %s", event, person, error_msg)
+            write_log("blink", f"NOTIFY {event} ({person}) PRESENCE ERROR: {error_msg}")
+            result["presence"] = {
+                "status": "error",
+                "error": "Presence update failed",
+                "message": error_msg,
+            }
 
     write_log(
         "blink",
-        f"NOTIFY {event}: notify={result['notify'].get('status')} "
+        f"NOTIFY {event}: person={person} "
+        f"presence={result.get('presence', {}).get('state', 'unchanged')} "
+        f"notify={result['notify'].get('status')} "
         f"alarm={result['alarm'].get('status')} - {cfg['title']}",
     )
     return result
 
 
 def leaving_home(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Webhook handler: arm the panel (if enabled) and notify you're leaving home."""
+    """Webhook handler: arm the panel (if enabled), notify, mark the person away.
+
+    The person comes from the payload's "id" field, defaulting to "娜".
+    """
     logger.debug("leaving_home payload: %s", payload)
     return _run_event("leaving_home", payload)
 
 
 def arriving_home(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Webhook handler: disarm the panel (if enabled) and notify you're arriving home."""
+    """Webhook handler: disarm the panel (if enabled), notify, mark the person home.
+
+    The person comes from the payload's "id" field, defaulting to "娜".
+    """
     logger.debug("arriving_home payload: %s", payload)
     return _run_event("arriving_home", payload)
 
@@ -142,4 +211,5 @@ if __name__ == "__main__":
     print("Testing notifyPhone job...")
     print(f"leaving_home:  {leaving_home({})}")
     print(f"arriving_home: {arriving_home({})}")
+    print(f"with id:       {leaving_home({'id': 'Alex'})}")
     print(f"payload override: {leaving_home({'title': 'Custom', 'message': 'Overridden'})}")

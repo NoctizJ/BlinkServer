@@ -58,6 +58,9 @@ desktop.ini
 # Uploaded files (never commit user uploads)
 files/
 
+# Runtime presence state (who is home / away)
+state/
+
 # Local config (contains secrets — never commit)
 credentials.json
 configs/home_assistant_config.json
