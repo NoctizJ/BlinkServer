@@ -22,6 +22,13 @@ attributed to jobs.presence_state.DEFAULT_PERSON ("娜"). Titles and messages
 may contain a "{id}" (or "{name}") placeholder, which is replaced with that
 person's name.
 
+Every title also gets an arm/disarm postfix describing the household once this
+event is applied — "(A)" when nobody is home any more, "(D)" when at least one
+person still is::
+
+    Leaving home (A)     # the last person left, so arm
+    Leaving home (D)     # somebody is still in, so disarm
+
 The title/message (and the arm/disarm flags) for each event are configurable
 in notify_config.json. An incoming webhook payload may also override "title",
 "message", and the "arm"/"disarm" flag per request. Resolution precedence is:
@@ -41,6 +48,7 @@ try:
     from jobs.presence_state import (
         STATE_AWAY,
         STATE_HOME,
+        anyone_home,
         resolve_person,
         set_state,
     )
@@ -51,6 +59,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
     from presence_state import (
         STATE_AWAY,
         STATE_HOME,
+        anyone_home,
         resolve_person,
         set_state,
     )
@@ -68,11 +77,38 @@ EVENT_STATES = {"leaving_home": STATE_AWAY, "arriving_home": STATE_HOME}
 # Placeholders in a title/message that are replaced with the person's name.
 ID_PLACEHOLDERS = ("{id}", "{name}")
 
+# Postfix appended to the notification title, describing the household once
+# this event is applied: "(A)" for arm (everybody is away), "(D)" for disarm (at
+# least one person is still home).
+POSTFIX_ARM = "(A)"
+POSTFIX_DISARM = "(D)"
+
 # Fallbacks used when notify_config.json is missing or lacks an event's entry.
 DEFAULT_MESSAGES = {
     "leaving_home": {"title": "Leaving home", "message": "{id} has left home.", "arm": True},
     "arriving_home": {"title": "Arriving home", "message": "{id} has arrived home.", "disarm": True},
 }
+
+
+def _title_postfix(event: str, person: str) -> str:
+    """Return "(A)" or "(D)" for the household state this event leaves behind.
+
+    The person's new state (away for leaving, home for arriving) is applied on
+    top of the stored presence *before* the check, so the postfix describes how
+    things stand after the event even though the store is only written later —
+    and stays right if that write fails.
+
+    "(A)" means arm: nobody is home any more. "(D)" means disarm: at least one
+    person is still home. An event with no presence of its own gets no postfix.
+    """
+    presence = EVENT_STATES.get(event)
+    if presence is None:
+        return ""
+    try:
+        return POSTFIX_DISARM if anyone_home({person: presence}) else POSTFIX_ARM
+    except Exception as e:  # An unreadable store must not cost us the notification.
+        logger.error("could not read presence for the %s title postfix: %s", event, e)
+        return ""
 
 
 def _fill_person(text: Any, person: str) -> str:
@@ -92,7 +128,8 @@ def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     Precedence: request payload > notify_config.json > built-in default. The
     resolved title/message have their "{id}" placeholder filled in with the
-    person named by the payload's "id" field.
+    person named by the payload's "id" field, and the title carries the
+    "(A)"/"(D)" postfix from :func:`_title_postfix`.
     """
     defaults = DEFAULT_MESSAGES.get(event, {"title": "Notification", "message": ""})
     action = EVENT_ACTIONS.get(event)  # "arm", "disarm", or None
@@ -108,11 +145,15 @@ def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     payload = payload if isinstance(payload, dict) else {}
     person = resolve_person(payload)
+    title = _fill_person(
+        payload.get("title") or file_cfg.get("title") or defaults["title"], person
+    )
+    # Whatever the title's source, it carries the arm/disarm postfix.
+    postfix = _title_postfix(event, person)
     resolved: Dict[str, Any] = {
         "person": person,
-        "title": _fill_person(
-            payload.get("title") or file_cfg.get("title") or defaults["title"], person
-        ),
+        "postfix": postfix,
+        "title": f"{title} {postfix}".strip() if postfix else title,
         "message": _fill_person(
             payload.get("message") or file_cfg.get("message") or defaults["message"], person
         ),
@@ -137,7 +178,7 @@ def _run_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _load_event_config(event, payload)
     person = cfg["person"]
     action = EVENT_ACTIONS.get(event)  # "arm" or "disarm"
-    result: Dict[str, Any] = {"event": event, "person": person}
+    result: Dict[str, Any] = {"event": event, "person": person, "title": cfg["title"]}
 
     # 1. Arm (leaving) or disarm (arriving) the alarm panel, gated by config.
     if action and cfg.get(action):
@@ -213,3 +254,4 @@ if __name__ == "__main__":
     print(f"arriving_home: {arriving_home({})}")
     print(f"with id:       {leaving_home({'id': 'Alex'})}")
     print(f"payload override: {leaving_home({'title': 'Custom', 'message': 'Overridden'})}")
+    print(f"postfix (away):   {_title_postfix('leaving_home', 'nobody')}")

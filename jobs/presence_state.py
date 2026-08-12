@@ -124,6 +124,23 @@ def all_states() -> Dict[str, Any]:
     return load_state().get("people", {})
 
 
+def anyone_home(overrides: Optional[Dict[str, str]] = None) -> bool:
+    """Return True when at least one person in the store is home.
+
+    ``overrides`` maps a person to a state to apply on top of the stored ones,
+    so a caller can ask about the household *after* an event it has not written
+    yet::
+
+        anyone_home({person: STATE_AWAY})   # is anybody left once they leave?
+
+    A store with nobody in it (and no overrides) counts as nobody home.
+    """
+    states = {name: entry.get("state") for name, entry in all_states().items()}
+    if overrides:
+        states.update(overrides)
+    return any(state == STATE_HOME for state in states.values())
+
+
 def _now() -> str:
     """Timestamp in the same format the logging engine uses."""
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -135,4 +152,5 @@ if __name__ == "__main__":
     print("resolve_person({})             ->", resolve_person({}))
     print("set_state ->", set_state(resolve_person({}), STATE_AWAY, event="leaving_home"))
     print("get_state ->", get_state(DEFAULT_PERSON))
+    print("anyone_home ->", anyone_home())
     print("Wrote to:", STATE_FILE)
