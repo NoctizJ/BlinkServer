@@ -282,12 +282,14 @@ def test_log_notifies_the_phone():
 
         # The default title/message, with the placeholders filled in.
         title, message = ln.notify_phone.call_args[0]
-        assert title == ln.DEFAULT_TEXT["title"] == "Location logged", title
-        assert message == "Alex is at Apple Park.", message
+        assert title == ln.DEFAULT_TEXT["title"] == "位置情報を記録", title
+        assert message == "Alex is at Apple Park (2026-08-18 09:15:23.123).", message
 
-        # A logged position with no address falls back to the coordinates.
-        lw.log({"id": "Alex", "latitude": 51.5014, "longitude": -0.1419})
-        assert ln.notify_phone.call_args[0][1] == "Alex is at 51.5014,-0.1419."
+        # A logged position with no address falls back to the coordinates, and
+        # carries whatever time was stored (defaulted to now here).
+        stored = lw.log({"id": "Alex", "latitude": 51.5014, "longitude": -0.1419})["location"]
+        assert ln.notify_phone.call_args[0][1] == (
+            f"Alex is at 51.5014,-0.1419 ({stored['time']})."), ln.notify_phone.call_args
 
         # New people are auto-registered as enabled, so they show up to toggle.
         assert ln.all_enabled() == {"Alex": True}, ln.all_enabled()

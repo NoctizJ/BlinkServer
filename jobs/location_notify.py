@@ -31,8 +31,8 @@ The title and message live with every other notification's text, in
 ``configs/notify_config.json`` under ``location_log``::
 
     "location_log": {
-      "title": "Location logged",
-      "message": "{id} is at {address}."
+      "title": "位置情報を記録",
+      "message": "{id} is at {address} ({time})."
     }
 
 Available placeholders: ``{id}``/``{name}``, ``{address}``, ``{latitude}``,
@@ -70,7 +70,7 @@ MASTER_SWITCH = "notify_phone"
 EVENT = "location_log"
 
 # Used when notify_config.json has no "location_log" entry.
-DEFAULT_TEXT = {"title": "Location logged", "message": "{id} is at {address}."}
+DEFAULT_TEXT = {"title": "位置情報を記録", "message": "{id} is at {address} ({time})."}
 
 
 def enabled_for(person: str) -> bool:

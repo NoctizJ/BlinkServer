@@ -398,14 +398,19 @@ curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
 
   ```json
   "location_log": {
-      "title": "Location logged",
-      "message": "{id} is at {address}."
+      "title": "位置情報を記録",
+      "message": "{id} is at {address} ({time})."
   }
   ```
 
+  which arrives as **位置情報を記録** / *Alex is at Apple Park, Cupertino
+  (2026-08-18 09:15:23.123).* Only this event's title is Japanese —
+  `leaving_home` and `arriving_home` keep their own text.
+
   Placeholders: `{id}`/`{name}`, `{address}`, `{latitude}`, `{longitude}`,
   `{time}` and `{maps_url}`. `{address}` falls back to the coordinates when the
-  logged position had none. A request may override `title`/`message` per call, so
+  logged position had none, and `{time}` is the entry's own timestamp — the one
+  the caller sent, or the moment the server stored it. A request may override `title`/`message` per call, so
   precedence matches the notify webhooks: payload > `notify_config.json` >
   built-in default.
 - Switched off means "do not notify", **not** "do not log" — the position is

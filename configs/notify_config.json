@@ -1,16 +1,16 @@
 {
   "leaving_home": {
-    "title": "Leaving home",
-    "message": "{id} has left home. Have a safe trip!",
+    "title": "がいしゅつ",
+    "message": "{id}さんが家を出ました。お気をつけて！",
     "arm": false
   },
   "arriving_home": {
-    "title": "Welcome home",
-    "message": "{id} is home. The alarm has been disarmed. Welcome back!",
+    "title": "きたく",
+    "message": "{id}さんが帰宅しました。アラームを解除しました。おかえりなさい！",
     "disarm": true
   },
   "location_log": {
-    "title": "Location logged",
-    "message": "{id} is at {address}."
+    "title": "位置情報を記録",
+    "message": "{id} is at {address} ({time})."
   }
 }
