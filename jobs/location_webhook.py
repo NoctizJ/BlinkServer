@@ -35,8 +35,10 @@ Apple Maps (``maps_url``) and one for Google Maps (``google_maps_url``). Pass
 ``history`` returns the whole history as a formatted text table in ``message``,
 like ``/logs/{type}/read`` and ``GET /presence``.
 
-``purge`` deletes entries older than ``days`` days (default
-:data:`DEFAULT_DAYS`), ageing them by ``recorded_at``.
+``purge`` deletes history either by count — ``{"records": 25}`` keeps the 25 most
+recently logged entries — or by age — ``{"days": 30}`` keeps the last 30 days,
+aged by ``recorded_at``. ``records`` wins if both are given; with neither, the
+:data:`DEFAULT_RECORDS` most recent entries are kept.
 
 Every handler resolves ``id`` the way the presence webhooks do, so a post with no
 ``id`` is attributed to ``娜``. Like presence, they report problems in their
@@ -58,6 +60,7 @@ try:
         location_entries,
         location_file,
         prune_locations,
+        trim_locations,
     )
     from jobs.presence_state import resolve_person
     from jobs.text_format import display_width, pad, rule
@@ -69,6 +72,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
         location_entries,
         location_file,
         prune_locations,
+        trim_locations,
     )
     from presence_state import resolve_person
     from text_format import display_width, pad, rule
@@ -84,8 +88,12 @@ LON_LIMIT = 180.0
 LATITUDE_KEYS = ("latitude", "lat")
 LONGITUDE_KEYS = ("longitude", "lon", "lng", "long")
 
-# How far back `purge` keeps when the caller does not say.
-DEFAULT_DAYS = 10
+# How many recent entries `purge` keeps when the caller asks for neither
+# `records` nor `days`.
+DEFAULT_RECORDS = 10
+
+# Friendly spellings for `purge`'s "how many to keep" input.
+RECORDS_KEYS = ("records", "keep")
 
 # Shown in the history table for an entry with no address, and in place of a
 # coordinate that a hand-edited file left out.
@@ -174,15 +182,34 @@ def _count(value: Any) -> Optional[int]:
     return count if count > 0 else None
 
 
-def _days(value: Any) -> Tuple[Optional[float], Optional[str]]:
-    """Coerce ``purge``'s ``days`` input, defaulting to :data:`DEFAULT_DAYS`.
+def _records(value: Any) -> Tuple[Optional[int], Optional[str]]:
+    """Coerce ``purge``'s ``records`` input — how many recent entries to keep.
 
-    Missing/blank means the default; numeric strings are accepted. Negatives are
-    refused — a negative window would purge entries newer than now, which is
-    never what anyone means.
+    Returns ``(count, None)``, ``(None, None)`` when the caller did not ask for a
+    count, or ``(None, message)`` for something unusable. Numeric strings are
+    accepted; ``0`` is allowed and means "keep none". Negatives are refused.
     """
     if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
-        return float(DEFAULT_DAYS), None
+        return None, None
+    try:
+        records = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None, f"Invalid records {value!r} - must be a whole number of entries"
+    if records < 0:
+        return None, f"Invalid records {value!r} - must be zero or more"
+    return records, None
+
+
+def _days(value: Any) -> Tuple[Optional[float], Optional[str]]:
+    """Coerce ``purge``'s ``days`` input — how far back to keep.
+
+    Returns ``(days, None)``, ``(None, None)`` when the caller did not ask for an
+    age, or ``(None, message)`` for something unusable. Numeric strings are
+    accepted. Negatives are refused — a negative window would purge entries newer
+    than now, which is never what anyone means.
+    """
+    if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+        return None, None
     try:
         days = float(value)
     except (TypeError, ValueError):
@@ -435,49 +462,77 @@ def history(payload: Dict[str, Any] = None) -> Dict[str, Any]:
 def purge(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     """Webhook handler for POST /webhook/location/purge.
 
-    Removes the caller's entries older than ``days`` days and reports how many
-    were removed, kept, and left alone as undated.
+    Deletes history two ways, and reports what it removed and kept:
 
-    Entries are aged by ``recorded_at`` — the timestamp this server wrote — and
-    by the caller's own ``time`` only as a fallback, because ``time`` is stored
-    in whatever format the caller sent. An entry whose timestamp cannot be
-    parsed at all is kept and counted in ``undated``: deleting data this server
-    cannot date would be worse than leaving it. ``days: 0`` is allowed and means
-    "purge everything up to now" — the file itself stays, empty.
+      - ``{"records": 25}`` keeps the 25 most recently logged entries;
+      - ``{"days": 30}`` keeps everything logged in the last 30 days.
+
+    **``records`` wins when both are given** — ``days`` is echoed back but not
+    applied, and ``mode`` says which was used. With neither, the default is to
+    keep the :data:`DEFAULT_RECORDS` most recent entries.
+
+    Counting by records is positional and ignores timestamps entirely. Ageing by
+    days uses ``recorded_at`` — the timestamp this server wrote — and the
+    caller's own ``time`` only as a fallback, because ``time`` is stored in
+    whatever format the caller sent; an entry whose timestamp cannot be parsed at
+    all is kept and counted in ``undated``, since deleting data this server
+    cannot date would be worse than leaving it.
+
+    ``records: 0`` and ``days: 0`` both empty the history; the file itself stays.
     """
     logger.debug("location purge payload: %s", payload)
 
     if payload is not None and not isinstance(payload, dict):
         return _bad_payload()
+    payload = payload if isinstance(payload, dict) else {}
 
-    days, error = _days(payload.get("days") if isinstance(payload, dict) else None)
+    records, error = _records(_first(payload, RECORDS_KEYS))
+    if error:
+        return {"status": "error", "error": "Invalid records", "message": error}
+    days, error = _days(payload.get("days"))
     if error:
         return {"status": "error", "error": "Invalid days", "message": error}
 
+    # Neither asked for: keep the newest DEFAULT_RECORDS entries.
+    if records is None and days is None:
+        records = DEFAULT_RECORDS
+
     person = resolve_person(payload)
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    result = {
+        "status": "ok",
+        "id": person,
+        "mode": "records" if records is not None else "days",
+        "records": records,
+        "days": days,
+        "cutoff": None,
+        "undated": 0,
+        "file": location_file(person).name,
+    }
 
     try:
-        removed, kept, undated = prune_locations(person, cutoff)
+        if records is not None:
+            removed, kept = trim_locations(person, records)
+            ignored = " (days ignored)" if days is not None else ""
+            message = (f"Purged {removed} {_entries(removed)} beyond the {records} most "
+                       f"recent for {person}; {kept} kept.{ignored}")
+        else:
+            cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+            removed, kept, undated = prune_locations(person, cutoff)
+            result.update({"cutoff": cutoff.strftime(TIMESTAMP_FORMAT)[:-3],
+                           "undated": undated})
+            message = (f"Purged {removed} {_entries(removed)} older than {days:g} "
+                       f"{'day' if days == 1 else 'days'} for {person}; {kept} kept.")
+            if undated:
+                message += f" {undated} kept without a usable timestamp."
     except Exception as e:  # unwritable state dir, unusable id, ...
         return _failed("Location purge failed", person, e)
 
-    message = (f"Purged {removed} {'entry' if removed == 1 else 'entries'} older than "
-               f"{days:g} {'day' if days == 1 else 'days'} for {person}; {kept} kept.")
-    if undated:
-        message += f" {undated} kept without a usable timestamp."
+    return {**result, "removed": removed, "kept": kept, "message": message}
 
-    return {
-        "status": "ok",
-        "id": person,
-        "days": days,
-        "cutoff": cutoff.strftime(TIMESTAMP_FORMAT)[:-3],
-        "removed": removed,
-        "kept": kept,
-        "undated": undated,
-        "file": location_file(person).name,
-        "message": message,
-    }
+
+def _entries(count: int) -> str:
+    """"entry" or "entries", for a count."""
+    return "entry" if count == 1 else "entries"
 
 
 if __name__ == "__main__":
@@ -491,7 +546,11 @@ if __name__ == "__main__":
     print("not json ->", log("nope"))
     print("fetch    ->", fetch({"id": "Alex"}))
     print("unknown  ->", fetch({"id": "nobody"}))
-    print("purge    ->", purge({"id": "Alex", "days": "30"}))
+    print("purge    ->", purge({"id": "Alex"}))                    # keep 10 newest
+    print("records  ->", purge({"id": "Alex", "records": "1"}))
+    print("days     ->", purge({"id": "Alex", "days": 30}))
+    print("both     ->", purge({"id": "Alex", "records": 5, "days": 30}))
     print("bad days ->", purge({"id": "Alex", "days": "ages"}))
+    print("bad recs ->", purge({"id": "Alex", "records": -1}))
     print()
     print(history({"id": "Alex"})["message"])

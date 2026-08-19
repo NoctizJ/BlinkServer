@@ -234,7 +234,7 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/location/log`       | Log a location for a person (see [Location log](#location-log)) 🔒 |
 | POST   | `/webhook/location/fetch`     | Read back a person's last location, JSON body 🔒 |
 | POST   | `/webhook/location/history`   | Read a person's whole history, formatted as text 🔒 |
-| POST   | `/webhook/location/purge`     | Delete history older than `days` (default 10) 🔒 |
+| POST   | `/webhook/location/purge`     | Trim history to `records` (default 10) or `days` 🔒 |
 | GET    | `/location`                   | Read back a person's last location as JSON; `?id=`, `?n=` 🔒 |
 | GET    | `/location/history`           | Read a person's location history as text; `?id=`, `?n=` 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
@@ -294,9 +294,9 @@ One job with four webhooks (`jobs/location_webhook.py`, the same shape as
 `presence_webhook.py`) — the location counterpart of the `log` job: **`log`**
 records where somebody is (and notifies your phone), **`fetch`** reads back the
 latest position as JSON, **`history`** renders the whole history as text, and
-**`purge`** deletes old entries. Nothing goes into `logs/default.log` or any
-other text log — each person's positions live in their own JSON file under
-`state/`.
+**`purge`** trims it to the newest N records (or to a number of days). Nothing
+goes into `logs/default.log` or any other text log — each person's positions live
+in their own JSON file under `state/`.
 
 Every one of them takes an **`id`** and defaults it the same way the presence
 webhooks do: a missing, blank, or non-string `id` is attributed to **`娜`**.
@@ -445,7 +445,7 @@ runtime state):
 - Entries **append**, newest last, capped at the newest 500 per person
   (`MAX_ENTRIES` in `jobs/location_state.py`) so a chatty phone cannot grow the
   file without bound. "Latest" therefore means most recently *logged*, not the
-  largest `time`. Prune by age with [`purge`](#purging-old-entries-purge).
+  largest `time`. Trim by count or age with [`purge`](#purging-old-entries-purge).
 - The filename is sanitized: path separators, control characters and leading dots
   in an `id` can never write outside `state/`. Non-ASCII names (`娜_loc.json`)
   are kept as-is.
@@ -514,35 +514,68 @@ Location history — Alex — 3 entries (newest first)
 
 ### Purging old entries (`purge`)
 
+Two ways to say what to keep — **by count** (the default) or **by age**:
+
 ```bash
-# Delete Alex's entries older than 30 days
+# Keep Alex's 25 most recent positions, delete the rest
+curl -X POST http://localhost:5050/webhook/location/purge \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex", "records": 25}'
+
+# Keep the last 30 days instead
 curl -X POST http://localhost:5050/webhook/location/purge \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
   -d '{"id": "Alex", "days": 30}'
+
+# Neither: keeps the 10 most recent
+curl -X POST http://localhost:5050/webhook/location/purge \
+  -H "X-Webhook-Secret: your-shared-secret-here"
 ```
 
 ```json
 {
     "status": "ok",
     "id": "Alex",
-    "days": 30.0,
-    "cutoff": "2026-07-19 20:13:38.928",
-    "removed": 2,
-    "kept": 2,
+    "mode": "records",
+    "records": 25,
+    "days": null,
+    "cutoff": null,
+    "removed": 5,
+    "kept": 25,
     "undated": 0,
-    "message": "Purged 2 entries older than 30 days for Alex; 2 kept."
+    "message": "Purged 5 entries beyond the 25 most recent for Alex; 25 kept."
 }
 ```
 
-- **`days` defaults to 10** (`DEFAULT_DAYS` in `jobs/location_webhook.py`) and may be a
-  numeric string. Negatives, `nan` and non-numbers are refused; `0` is allowed and
-  means "everything up to now" (the file stays, empty).
-- Entries are aged by **`recorded_at`**, the timestamp this server wrote, falling
+| Input                  | Keeps                                  | Mode      |
+| ---------------------- | -------------------------------------- | --------- |
+| `{"records": 25}`      | the 25 most recently logged entries    | `records` |
+| `{"days": 30}`         | everything logged in the last 30 days  | `days`    |
+| both                   | **records wins**, `days` is ignored    | `records` |
+| neither                | the 10 most recent (`DEFAULT_RECORDS`) | `records` |
+
+- **`records` beats `days` whenever both are passed.** The response echoes both
+  inputs and `mode` tells you which rule was applied — in records mode `cutoff` is
+  `null` and the message ends `(days ignored)`. Check `records`/`days` in the
+  response to confirm the server read what you sent.
+- Either field also works as a query parameter —
+  `POST /webhook/location/purge?id=Alex&records=3` — see
+  [Configuration](#configuration).
+- `records` may be a numeric string and must be a whole number ≥ 0; `records: 0`
+  empties the history (the file stays). `keep` works as an alias.
+- `days` may be any number ≥ 0 — `nan`, `inf` and negatives are refused. `days: 0`
+  means "everything up to now". It has no default: leave it out and the record
+  count applies instead.
+- Counting by records is **positional** — it ignores timestamps entirely, so it
+  works even on entries whose `time` is unparseable.
+- Ageing by days uses **`recorded_at`**, the timestamp this server wrote, falling
   back to the caller's `time` only if `recorded_at` is missing. A phone with a
   wrong clock therefore cannot talk the server into deleting fresh data.
-- An entry whose timestamp cannot be parsed at all is **kept** and counted in
-  `undated` — deleting data the server cannot date would be worse than keeping it.
+- In days mode, an entry whose timestamp cannot be parsed at all is **kept** and
+  counted in `undated` — deleting data the server cannot date would be worse than
+  keeping it.
 - It only ever touches the one id's file. There is no GET form: purging is
   destructive, so it is POST-with-the-secret only.
 - To run it on a schedule, point cron (or a Home Assistant automation) at the
@@ -586,7 +619,26 @@ its `Latitude` / `Longitude` to `/webhook/location/log`.
 ```
 
 - `module` — the job module that handles the request (must expose a `run(payload)` function)
+- `function` — the function to call, when a module handles several webhooks (defaults to `run`)
 - `require_secret` — when `true`, the request must include the shared secret in the `X-Webhook-Secret` header; `false` disables auth for that webhook
+
+A webhook's inputs may be sent **either as a JSON body or as query parameters**,
+and the body wins when a field appears in both:
+
+```bash
+curl -X POST "http://localhost:5050/webhook/location/purge?id=Alex&records=3" \
+  -H "X-Webhook-Secret: your-shared-secret-here"
+
+curl -X POST http://localhost:5050/webhook/location/purge \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" -d '{"id": "Alex", "records": 3}'
+```
+
+A JSON body is parsed even if you forget `Content-Type: application/json` —
+otherwise it would be dropped silently and the job would run with its defaults.
+The one exception is `/webhook/upload`, whose multipart body belongs to the job
+itself (see [Uploads.md](docs/Uploads.md)); send its fields as query parameters or
+form fields.
 
 **`configs/webhook_secret.json`** holds the single shared secret used by every
 authenticated webhook. It is gitignored — copy it from the example and fill it in:

@@ -176,9 +176,123 @@ def test_history_edge_cases():
     print("  OK: empty, capped, singular and odd histories all render")
 
 
-def test_purge_removes_only_old_entries():
-    """Entries older than `days` go; newer ones stay. Default is 10 days."""
-    print("Testing purge...")
+def test_webhook_accepts_query_params_and_a_headerless_body():
+    """A webhook's inputs work as query params, and without a JSON header.
+
+    Regression: `?records=3` used to be dropped, as was a JSON body sent without
+    `Content-Type: application/json` — so `purge` silently ran with its defaults,
+    against the default person rather than the requested id.
+    """
+    print("Testing webhook payload sources...")
+    client, headers = _client_and_headers()
+    if not client:
+        return
+
+    def fifteen_for(person):
+        ls.save_locations(person, {"entries": []})
+        for i in range(15):
+            lw.log({"id": person, "latitude": i, "longitude": i})
+
+    with temp_location_dir():
+        # 1. JSON body with the header (already worked).
+        fifteen_for("Alex")
+        res = client.post("/webhook/location/purge", headers=headers,
+                          json={"id": "Alex", "records": 3}).get_json()["result"]
+        assert (res["id"], res["records"], res["kept"]) == ("Alex", 3, 3), res
+
+        # 2. Query parameters.
+        fifteen_for("Alex")
+        res = client.post("/webhook/location/purge?id=Alex&records=3",
+                          headers=headers).get_json()["result"]
+        assert (res["id"], res["records"], res["kept"]) == ("Alex", 3, 3), res
+
+        # 3. A JSON body with no Content-Type header.
+        fifteen_for("Alex")
+        res = client.post("/webhook/location/purge", headers=headers,
+                          data='{"id": "Alex", "records": 3}').get_json()["result"]
+        assert (res["id"], res["records"], res["kept"]) == ("Alex", 3, 3), res
+
+        # 4. The body wins over the query string.
+        fifteen_for("Alex")
+        res = client.post("/webhook/location/purge?records=9", headers=headers,
+                          json={"id": "Alex", "records": 3}).get_json()["result"]
+        assert (res["records"], res["kept"]) == (3, 3), res
+
+        # 5. Query params reach the other handlers too.
+        res = client.post("/webhook/location/log?id=Alex&latitude=1.5&longitude=2.5",
+                          headers=headers).get_json()["result"]
+        assert res["location"]["latitude"] == 1.5, res
+        assert client.post("/webhook/location/history?id=Alex",
+                           headers=headers).get_json()["result"]["id"] == "Alex"
+
+        # 6. A non-dict JSON body is ignored rather than crashing the handler.
+        assert client.post("/webhook/location/purge", headers=headers,
+                           json=["nope"]).get_json()["result"]["id"] == ps.DEFAULT_PERSON
+    print("  OK: query params, headerless bodies, body-wins precedence")
+
+
+def test_purge_keeps_the_most_recent_records_by_default():
+    """With no input, purge keeps the DEFAULT_RECORDS newest entries."""
+    print("Testing purge by record count...")
+    with temp_location_dir():
+        for i in range(15):
+            lw.log({"id": "Alex", "latitude": i, "longitude": i, "address": f"stop {i}"})
+
+        res = lw.purge({"id": "Alex"})                 # no records, no days
+        assert res["status"] == "ok", res
+        assert res["mode"] == "records", res
+        assert res["records"] == lw.DEFAULT_RECORDS == 10, res
+        assert res["days"] is None and res["cutoff"] is None, res
+        assert res["removed"] == 5 and res["kept"] == 10, res
+        assert res["message"] == (
+            "Purged 5 entries beyond the 10 most recent for Alex; 10 kept."), res["message"]
+
+        # The 10 kept are the newest ones, oldest-first as always.
+        kept = [e["address"] for e in ls.location_entries("Alex")]
+        assert kept == [f"stop {i}" for i in range(5, 15)], kept
+
+        # An explicit count, and one that removes nothing.
+        assert lw.purge({"id": "Alex", "records": "3"})["removed"] == 7
+        assert [e["address"] for e in ls.location_entries("Alex")] == [
+            "stop 12", "stop 13", "stop 14"]
+        assert lw.purge({"id": "Alex", "records": 99})["removed"] == 0
+        assert lw.purge({"id": "Alex", "keep": 3})["removed"] == 0      # alias
+
+        # records=0 empties the history; the file itself stays.
+        zeroed = lw.purge({"id": "Alex", "records": 0})
+        assert zeroed["removed"] == 3 and zeroed["kept"] == 0, zeroed
+        assert ls.location_entries("Alex") == []
+        assert lw.fetch({"id": "Alex"})["found"] is False
+        assert ls.location_file("Alex").exists()
+    print("  OK: keeps the N newest, default 10, positionally")
+
+
+def test_purge_records_wins_over_days():
+    """When both are given, only records is applied — days is echoed, not used."""
+    print("Testing purge with both records and days...")
+    with temp_location_dir():
+        now = datetime.datetime.now()
+        stamp = lambda days_ago: (now - datetime.timedelta(days=days_ago)).strftime(
+            ls.TIMESTAMP_FORMAT)[:-3]
+        for days_ago in (40, 30, 20, 1):
+            _log_at("Alex", stamp(days_ago), address=f"{days_ago} days ago")
+
+        # By days alone, 3 of these are older than 10 days. By records=2, only
+        # the 2 oldest go — so the result proves which rule was applied.
+        res = lw.purge({"id": "Alex", "records": 2, "days": 10})
+        assert res["mode"] == "records", res
+        assert res["records"] == 2 and res["days"] == 10.0, res   # both echoed
+        assert res["cutoff"] is None, res                        # days not applied
+        assert res["removed"] == 2 and res["kept"] == 2, res
+        assert res["message"].endswith("(days ignored)"), res["message"]
+        assert [e["address"] for e in ls.location_entries("Alex")] == [
+            "20 days ago", "1 days ago"]
+    print("  OK: records wins, days reported but ignored")
+
+
+def test_purge_by_days_still_works():
+    """Asking for days alone ages entries as before."""
+    print("Testing purge by age...")
     with temp_location_dir():
         now = datetime.datetime.now()
         stamp = lambda days_ago: (now - datetime.timedelta(days=days_ago)).strftime(
@@ -187,27 +301,27 @@ def test_purge_removes_only_old_entries():
         for days_ago in (30, 20, 9, 1):
             _log_at("Alex", stamp(days_ago), address=f"{days_ago} days ago")
 
-        res = lw.purge({"id": "Alex"})            # default 10 days
-        assert res["status"] == "ok", res
-        assert res["days"] == float(lw.DEFAULT_DAYS) == 10.0, res
+        res = lw.purge({"id": "Alex", "days": 10})
+        assert res["mode"] == "days", res
+        assert res["days"] == 10.0 and res["records"] is None, res
+        assert res["cutoff"], res
         assert res["removed"] == 2 and res["kept"] == 2, res
         assert res["undated"] == 0, res
         assert res["message"] == (
             "Purged 2 entries older than 10 days for Alex; 2 kept."), res["message"]
 
-        addresses = [e["address"] for e in ls.load_locations("Alex")["entries"]]
+        addresses = [e["address"] for e in ls.location_entries("Alex")]
         assert addresses == ["9 days ago", "1 days ago"], addresses
 
         # A tighter window takes another one; a wider one takes nothing.
         assert lw.purge({"id": "Alex", "days": "5"})["removed"] == 1
         assert lw.purge({"id": "Alex", "days": 365})["removed"] == 0
-        assert [e["address"] for e in ls.load_locations("Alex")["entries"]] == ["1 days ago"]
+        assert [e["address"] for e in ls.location_entries("Alex")] == ["1 days ago"]
 
         # days=0 purges everything logged up to now, leaving the file empty.
         zeroed = lw.purge({"id": "Alex", "days": 0})
         assert zeroed["removed"] == 1 and zeroed["kept"] == 0, zeroed
-        assert ls.load_locations("Alex")["entries"] == []
-        assert lw.fetch({"id": "Alex"})["found"] is False
+        assert ls.location_entries("Alex") == []
         assert ls.location_file("Alex").exists()      # the file itself stays
     print("  OK: only entries older than the window are removed")
 
@@ -243,8 +357,8 @@ def test_purge_ages_by_recorded_at_and_keeps_undated():
     print("  OK: aged by recorded_at, undated entries kept and reported")
 
 
-def test_purge_validates_days_and_touches_one_id():
-    """Bad `days` is an error, and a purge never touches another person."""
+def test_purge_validates_its_inputs_and_touches_one_id():
+    """Bad `days`/`records` are errors, and a purge never touches another person."""
     print("Testing purge validation and isolation...")
     with temp_location_dir():
         old = (datetime.datetime.now() - datetime.timedelta(days=40)).strftime(
@@ -255,21 +369,27 @@ def test_purge_validates_days_and_touches_one_id():
         for bad in ("ages", -1, "-0.5", "nan", "inf", [1]):
             res = lw.purge({"id": "Alex", "days": bad})
             assert res["status"] == "error" and res["error"] == "Invalid days", (bad, res)
+        for bad in ("lots", -1, "-3", 1.5, "2.5", [1]):
+            res = lw.purge({"id": "Alex", "records": bad})
+            assert res["status"] == "error" and res["error"] == "Invalid records", (bad, res)
         assert lw.purge("nope")["error"] == "Invalid payload format"
 
         # Nothing was removed by any of the rejected calls.
-        assert len(ls.load_locations("Alex")["entries"]) == 1
+        assert len(ls.location_entries("Alex")) == 1
 
         # Purging Alex leaves Sam's history and the presence store alone.
         with mock.patch.object(ps, "set_state") as set_state:
             assert lw.purge({"id": "Alex", "days": 10})["removed"] == 1
             set_state.assert_not_called()
-        assert len(ls.load_locations("Sam")["entries"]) == 1, "Sam's history was touched"
+        assert len(ls.location_entries("Sam")) == 1, "Sam's history was touched"
 
-        # Blank/missing days means the default, not an error.
+        # Blank/missing inputs are not errors — they mean "not asked for", so the
+        # default record count applies.
         for blank in (None, "", "  "):
-            assert lw.purge({"id": "Sam", "days": blank})["days"] == 10.0, blank
-    print("  OK: bad days rejected, only the named id is purged")
+            res = lw.purge({"id": "Sam", "days": blank, "records": blank})
+            assert res["mode"] == "records", (blank, res)
+            assert res["records"] == lw.DEFAULT_RECORDS, (blank, res)
+    print("  OK: bad days/records rejected, only the named id is purged")
 
 
 def test_log_notifies_the_phone():
@@ -747,9 +867,12 @@ if __name__ == "__main__":
     test_notification_endpoints()
     test_history_formats_all_entries_as_text()
     test_history_edge_cases()
-    test_purge_removes_only_old_entries()
+    test_webhook_accepts_query_params_and_a_headerless_body()
+    test_purge_keeps_the_most_recent_records_by_default()
+    test_purge_records_wins_over_days()
+    test_purge_by_days_still_works()
     test_purge_ages_by_recorded_at_and_keeps_undated()
-    test_purge_validates_days_and_touches_one_id()
+    test_purge_validates_its_inputs_and_touches_one_id()
     test_log_writes_a_file_per_id()
     test_log_never_writes_to_the_text_logs()
     test_log_defaults_id_time_and_address()

@@ -135,6 +135,30 @@ def get_job_enabled_status(job_name):
     return job_config.get("jobs", {}).get(job_name, True)  # Default to enabled
 
 
+# Content types whose body belongs to the job itself: the upload webhook reads
+# the multipart request directly (see jobs/file_upload.py), and reading the body
+# as JSON here would consume the stream before it gets the chance.
+FORM_MIMETYPES = ("multipart/form-data", "application/x-www-form-urlencoded")
+
+
+def webhook_payload():
+    """Build a job's payload from the request's query string and JSON body.
+
+    Inputs may arrive either way and the body wins, so
+    `POST /webhook/location/purge?records=3` and the same field in a JSON body
+    are equivalent. The body is parsed with `force=True` because a caller that
+    forgets `Content-Type: application/json` would otherwise have it silently
+    dropped — and a dropped field means a job runs with its defaults instead of
+    what was asked for.
+    """
+    body = {}
+    if request.mimetype not in FORM_MIMETYPES:
+        body = request.get_json(silent=True, force=True) or {}
+    if not isinstance(body, dict):  # a JSON list/string body is not a payload
+        body = {}
+    return {**request.args.to_dict(), **body}
+
+
 def make_handler(hook):
     module_name = hook["module"]
     function_name = hook.get("function", "run")
@@ -146,7 +170,7 @@ def make_handler(hook):
             if error:
                 return error
 
-        payload = request.get_json(silent=True) or {}
+        payload = webhook_payload()
 
         # Check if job is enabled
         job_name = module_name.split('.')[-1]  # Get the job name from module path
@@ -373,24 +397,6 @@ def presence():
 # GET so an iPhone Shortcut (or any GET-only tool) can fetch a person's position
 # and hand `maps_url` straight to Maps. Writing a position stays POST-only, on
 # /webhook/location/log, and so does purging, on /webhook/location/purge.
-def location_query():
-    """Read the `id` / `n` inputs of the location endpoints.
-
-    Both come from the query string or, for callers that prefer a JSON body, from
-    the posted body. Absent inputs are left out entirely so the job applies its
-    own defaults (the default person, and "everything" for `n`).
-    """
-    body = request.get_json(silent=True) or {}
-    query = {}
-    person = request.args.get("id") or body.get("id")
-    if person:
-        query["id"] = person
-    count = request.args.get("n") or body.get("n")
-    if count:
-        query["n"] = count
-    return query
-
-
 @app.route("/location", methods=["GET", "POST"])
 @require_webhook_secret
 def location():
@@ -401,7 +407,7 @@ def location():
     nothing logged yet comes back as `"found": false` with null fields, not a
     404, so a Shortcut sees a normal response.
     """
-    return jsonify(fetch_location(location_query()))
+    return jsonify(fetch_location(webhook_payload()))
 
 
 # The history for the same store, as plain text rather than JSON — like
@@ -415,7 +421,7 @@ def location_history():
     Use `?id=<person>` to choose whom to look up (defaults to the store's
     default person) and `?n=<count>` for only the most recent entries.
     """
-    result = location_history_text(location_query())
+    result = location_history_text(webhook_payload())
     return Response(result["message"] + "\n", mimetype="text/plain")
 
 

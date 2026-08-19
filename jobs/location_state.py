@@ -251,6 +251,27 @@ def entry_datetime(entry: Any) -> Optional[datetime.datetime]:
     return None
 
 
+def trim_locations(person: str, keep: int) -> Tuple[int, int]:
+    """Keep only a person's ``keep`` most recently logged entries.
+
+    Returns ``(removed, kept)``. Timestamps are not consulted at all — this is
+    purely positional, so an entry whose ``time`` cannot be parsed is treated
+    like any other (unlike :func:`prune_locations`, which keeps those). ``keep``
+    of 0 empties the history; the file itself stays, and is only rewritten when
+    something was actually removed.
+    """
+    store = load_locations(person)
+    entries = store.get("entries") or []
+    removed = max(0, len(entries) - max(0, keep))
+
+    if removed:
+        store["entries"] = entries[removed:]
+        save_locations(person, store)
+        logger.debug("Trimmed %s location entries for %s (kept %s)",
+                     removed, person, len(entries) - removed)
+    return removed, len(entries) - removed
+
+
 def prune_locations(person: str, cutoff: datetime.datetime) -> Tuple[int, int, int]:
     """Drop a person's entries older than ``cutoff``.
 
