@@ -26,6 +26,13 @@ from jobs.log_engine import (
     MASTER_SWITCH,
 )
 from jobs.presence_webhook import read as read_presence
+from jobs.location_webhook import fetch as fetch_location, history as location_history_text
+from jobs.location_notify import (
+    MASTER_SWITCH as NOTIFY_MASTER_SWITCH,
+    all_enabled as all_location_notify,
+    enabled_for as location_notify_enabled,
+    set_enabled_for as set_location_notify_for,
+)
 
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
@@ -358,6 +365,104 @@ def presence():
     if fmt == "json":
         return jsonify(result)
     return Response(result["message"] + "\n", mimetype="text/plain")
+
+
+# Location endpoints
+#
+# Readers for the locations written by POST /webhook/location/log, exposed over
+# GET so an iPhone Shortcut (or any GET-only tool) can fetch a person's position
+# and hand `maps_url` straight to Maps. Writing a position stays POST-only, on
+# /webhook/location/log, and so does purging, on /webhook/location/purge.
+def location_query():
+    """Read the `id` / `n` inputs of the location endpoints.
+
+    Both come from the query string or, for callers that prefer a JSON body, from
+    the posted body. Absent inputs are left out entirely so the job applies its
+    own defaults (the default person, and "everything" for `n`).
+    """
+    body = request.get_json(silent=True) or {}
+    query = {}
+    person = request.args.get("id") or body.get("id")
+    if person:
+        query["id"] = person
+    count = request.args.get("n") or body.get("n")
+    if count:
+        query["n"] = count
+    return query
+
+
+@app.route("/location", methods=["GET", "POST"])
+@require_webhook_secret
+def location():
+    """Return a person's most recently logged location as JSON.
+
+    Use `?id=<person>` to choose whom to look up (defaults to the store's
+    default person) and `?n=<count>` to include the recent history. An id with
+    nothing logged yet comes back as `"found": false` with null fields, not a
+    404, so a Shortcut sees a normal response.
+    """
+    return jsonify(fetch_location(location_query()))
+
+
+# The history for the same store, as plain text rather than JSON — like
+# /logs/{type}/read and GET /presence, the body is the formatted table itself,
+# ready to display. Everything is returned unless ?n= caps it.
+@app.route("/location/history", methods=["GET", "POST"])
+@require_webhook_secret
+def location_history():
+    """Return a person's whole location history as a plain text table.
+
+    Use `?id=<person>` to choose whom to look up (defaults to the store's
+    default person) and `?n=<count>` for only the most recent entries.
+    """
+    result = location_history_text(location_query())
+    return Response(result["message"] + "\n", mimetype="text/plain")
+
+
+# Per-person switches for the phone notification that POST /webhook/location/log
+# sends. These mirror the /logs/{type}/* switches: one entry per id in
+# configs/location_notify_config.json, under the master `notify_phone` job
+# switch. A person nobody has toggled yet is on.
+@app.route("/location/notify", methods=["GET"])
+@require_webhook_secret
+def list_location_notify():
+    """List each person's location-notification switch, and the master switch."""
+    people = [{"id": person, "enabled": enabled}
+              for person, enabled in sorted(all_location_notify().items())]
+    return jsonify({
+        "master": {"job": NOTIFY_MASTER_SWITCH,
+                   "enabled": get_job_enabled_status(NOTIFY_MASTER_SWITCH)},
+        "ids": people,
+    })
+
+
+def set_location_notify(person, enabled):
+    """Persist one person's location-notification switch and describe it."""
+    set_location_notify_for(person, enabled)
+    action = "enabled" if enabled else "disabled"
+    return jsonify({"status": "ok", "id": person, "enabled": enabled,
+                    "message": f"Location notifications for {person} {action}"})
+
+
+@app.route("/location/notify/<person>/enable", methods=["POST"])
+@require_webhook_secret
+def enable_location_notify(person):
+    """Turn on the location notification for one person."""
+    return set_location_notify(person, True)
+
+
+@app.route("/location/notify/<person>/disable", methods=["POST"])
+@require_webhook_secret
+def disable_location_notify(person):
+    """Turn off the location notification for one person."""
+    return set_location_notify(person, False)
+
+
+@app.route("/location/notify/<person>/toggle", methods=["POST"])
+@require_webhook_secret
+def toggle_location_notify(person):
+    """Flip the location notification for one person."""
+    return set_location_notify(person, not location_notify_enabled(person))
 
 
 config = load_config()

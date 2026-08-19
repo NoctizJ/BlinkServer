@@ -8,5 +8,9 @@
     "title": "Welcome home",
     "message": "{id} is home. The alarm has been disarmed. Welcome back!",
     "disarm": true
+  },
+  "location_log": {
+    "title": "Location logged",
+    "message": "{id} is at {address}."
   }
 }

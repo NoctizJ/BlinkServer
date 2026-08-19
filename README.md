@@ -14,6 +14,10 @@ server code.
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 - Per-person home/away presence, persisted in `state/presence.json` and readable
   over HTTP (`/webhook/presence/read`)
+- Per-person location log — each id gets its own `state/<id>_loc.json`, written by
+  `/webhook/location/log`, readable as JSON (ready for an iPhone Shortcut to open in
+  Maps) or as a formatted text history, prunable by age, and able to notify your
+  phone with a switch per person — see [Location log](#location-log)
 - Leaving/arriving notification titles postfixed `(A)`/`(D)` for arm/disarm,
   depending on whether anyone is still home — see [Arm/disarm postfix](#armdisarm-postfix)
 
@@ -59,6 +63,8 @@ event arms/disarms the alarm panel:
 - `arm` / `disarm` — when `true`, leaving also arms the panel and arriving also
   disarms it (reusing the same Home Assistant panel as `/webhook/blink/*`). Set
   to `false` to notify only.
+- A third event, `location_log`, holds the text for the notification a logged
+  position sends — see [Notifying your phone](#notifying-your-phone-per-person).
 - `{id}` (or `{name}`) in a title/message is replaced with the person's name —
   see [Who left / arrived](#who-left--arrived) below.
 - Every title also ends in an **arm/disarm postfix** — see
@@ -225,6 +231,16 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/presence/read`      | Read who's home / away, JSON body (see [Who left / arrived](#who-left--arrived)) 🔒 |
 | POST   | `/webhook/presence/write`     | Set a person's home/away state by hand 🔒 |
 | GET    | `/presence`                   | Read who's home / away as text; `?id=`, `?format=json` 🔒 |
+| POST   | `/webhook/location/log`       | Log a location for a person (see [Location log](#location-log)) 🔒 |
+| POST   | `/webhook/location/fetch`     | Read back a person's last location, JSON body 🔒 |
+| POST   | `/webhook/location/history`   | Read a person's whole history, formatted as text 🔒 |
+| POST   | `/webhook/location/purge`     | Delete history older than `days` (default 10) 🔒 |
+| GET    | `/location`                   | Read back a person's last location as JSON; `?id=`, `?n=` 🔒 |
+| GET    | `/location/history`           | Read a person's location history as text; `?id=`, `?n=` 🔒 |
+| GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
+| POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
+| POST   | `/location/notify/{id}/disable` | Stop notifying for this person 🔒 |
+| POST   | `/location/notify/{id}/toggle`  | Flip this person's notification switch 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
@@ -272,6 +288,282 @@ curl -X POST http://localhost:5050/logs/blink/disable \
   -H "X-Webhook-Secret: your-shared-secret-here"
 ```
 
+## Location log
+
+One job with four webhooks (`jobs/location_webhook.py`, the same shape as
+`presence_webhook.py`) — the location counterpart of the `log` job: **`log`**
+records where somebody is (and notifies your phone), **`fetch`** reads back the
+latest position as JSON, **`history`** renders the whole history as text, and
+**`purge`** deletes old entries. Nothing goes into `logs/default.log` or any
+other text log — each person's positions live in their own JSON file under
+`state/`.
+
+Every one of them takes an **`id`** and defaults it the same way the presence
+webhooks do: a missing, blank, or non-string `id` is attributed to **`娜`**.
+
+```bash
+# Log a position
+curl -X POST http://localhost:5050/webhook/location/log \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex", "latitude": 37.334606, "longitude": -122.009102,
+       "address": "Apple Park, Cupertino", "time": "2026-08-18 09:15:23.123"}'
+
+# Read the latest one back
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/location?id=Alex"
+```
+
+```json
+{
+    "status": "ok",
+    "id": "Alex",
+    "found": true,
+    "latitude": 37.334606,
+    "longitude": -122.009102,
+    "address": "Apple Park, Cupertino",
+    "time": "2026-08-18 09:15:23.123",
+    "recorded_at": "2026-08-18 09:15:23.980",
+    "maps_url": "https://maps.apple.com/?ll=37.334606,-122.009102&q=Apple+Park%2C+Cupertino",
+    "google_maps_url": "https://www.google.com/maps?q=37.334606,-122.009102",
+    "message": "Alex was at Apple Park, Cupertino at 2026-08-18 09:15:23.123",
+    "file": "Alex_loc.json"
+}
+```
+
+### Logging a location (`log`)
+
+| Field       | Required | Notes                                                        |
+| ----------- | -------- | ------------------------------------------------------------ |
+| `id`        | no       | Who this position belongs to; defaults to `娜`, same as presence |
+| `latitude`  | **yes**  | −90…90; also accepts `lat`, and numeric strings               |
+| `longitude` | **yes**  | −180…180; also accepts `lon` / `lng` / `long`                 |
+| `address`   | no       | Free text; becomes the Maps pin label. Stored as `null` if omitted |
+| `time`      | no       | The caller's own timestamp, stored **verbatim**; defaults to now |
+
+A missing or out-of-range coordinate is reported as a JSON error and nothing is
+written. Coordinates may arrive as strings, because Shortcuts sends every field
+as text.
+
+### Notifying your phone (per person)
+
+Every logged position also pushes a notification to your phone, through the same
+Home Assistant `notify` service the arrival/departure webhooks use. **Two
+switches** gate it, and both must be on:
+
+| Switch     | Where                                                     | Scope                                     |
+| ---------- | --------------------------------------------------------- | ----------------------------------------- |
+| master     | `configs/job_config.json` → `notify_phone`                 | every phone notification this server sends |
+| per person | `configs/location_notify_config.json` → `ids.<id>`         | one person's logged positions              |
+
+```bash
+# Who is getting location notifications?
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/location/notify
+```
+
+```json
+{
+    "master": { "job": "notify_phone", "enabled": true },
+    "ids": [ { "id": "Alex", "enabled": true }, { "id": "娜", "enabled": false } ]
+}
+```
+
+```bash
+# One person off, on, or flipped
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/location/notify/Alex/disable
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/location/notify/Alex/toggle
+
+# Silence the lot — this is the notify_phone job, so it also covers
+# /webhook/notify/leaving and /webhook/notify/arriving
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/jobs/notify_phone/disable
+```
+
+- A person nobody has toggled yet is **on**, and is written into
+  `location_notify_config.json` the first time they log a position — so they show
+  up in the listing and can be turned off. The file is created automatically:
+
+  ```json
+  {
+      "ids": { "Alex": true, "娜": false },
+      "last_modified": "2026-08-18 21:04:11.221"
+  }
+  ```
+
+- The title and message live with every other notification's text, in
+  **`configs/notify_config.json`** under `location_log`:
+
+  ```json
+  "location_log": {
+      "title": "Location logged",
+      "message": "{id} is at {address}."
+  }
+  ```
+
+  Placeholders: `{id}`/`{name}`, `{address}`, `{latitude}`, `{longitude}`,
+  `{time}` and `{maps_url}`. `{address}` falls back to the coordinates when the
+  logged position had none. A request may override `title`/`message` per call, so
+  precedence matches the notify webhooks: payload > `notify_config.json` >
+  built-in default.
+- Switched off means "do not notify", **not** "do not log" — the position is
+  still stored either way.
+- The outcome comes back in the `notify` field of the `/webhook/location/log`
+  response (`success`, `skipped` with the reason, or `error`). A notification that
+  cannot be sent never fails the write.
+- Non-ASCII ids work in the path: `/location/notify/娜/disable`.
+
+### The store
+
+Each id gets **`state/<id>_loc.json`** (created automatically, gitignored as
+runtime state):
+
+```json
+{
+    "id": "Alex",
+    "entries": [
+        {
+            "latitude": 37.334606,
+            "longitude": -122.009102,
+            "address": "Apple Park, Cupertino",
+            "time": "2026-08-18 09:15:23.123",
+            "recorded_at": "2026-08-18 09:15:23.980"
+        }
+    ],
+    "last_modified": "2026-08-18 09:15:23.980"
+}
+```
+
+- `time` is yours; `recorded_at` is when this server wrote the entry.
+- Entries **append**, newest last, capped at the newest 500 per person
+  (`MAX_ENTRIES` in `jobs/location_state.py`) so a chatty phone cannot grow the
+  file without bound. "Latest" therefore means most recently *logged*, not the
+  largest `time`. Prune by age with [`purge`](#purging-old-entries-purge).
+- The filename is sanitized: path separators, control characters and leading dots
+  in an `id` can never write outside `state/`. Non-ASCII names (`娜_loc.json`)
+  are kept as-is.
+- Other jobs can read or write the store through `jobs/location_state.py`
+  (`append_location`, `latest_location`, `location_entries`, `prune_locations`).
+  Reading a caller's payload and building the map links live one level up, in
+  `jobs/location_webhook.py`.
+
+### Reading it back (`fetch`)
+
+```bash
+# One person, plus their 5 most recent positions
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/location?id=Alex&n=5"
+
+# The same reader as a POST webhook, for callers that prefer a JSON body
+curl -X POST http://localhost:5050/webhook/location/fetch \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" -d '{"id": "Alex"}'
+```
+
+- `GET /location` — JSON; `?id=<person>` picks whom (defaults to `娜`), `?n=<count>`
+  adds an `entries` list of recent positions, newest first. Also accepts POST with
+  the same fields in a JSON body.
+- Two ready-to-open map links come with every found position — **`maps_url`** for
+  Apple Maps (`maps.apple.com/?ll=<lat>,<lon>&q=<address>`, pin labelled with the
+  address) and **`google_maps_url`** for Google Maps
+  (`google.com/maps?q=<lat>,<lon>`, works on Android and in any browser). Both are
+  `null` if the stored entry has no usable coordinates.
+- An id with nothing logged yet is **not** an error: you get a normal `200` with
+  `"found": false` and null fields, so a Shortcut does not fail on a `404`.
+- The four `/webhook/location/*` paths are the single `location_webhook` job, so
+  `POST /jobs/location_webhook/disable` turns the set off — exactly as
+  `presence_webhook` covers both presence paths. Like `GET /presence`, the two
+  `GET /location*` endpoints are management endpoints and are not affected by that
+  switch (the `/webhook/location/*` paths are).
+
+### The whole history as text (`history`)
+
+`fetch` only answers "where are they now". For "where have they been", read
+the history — this one is **plain text**, not JSON, like `/logs/{type}/read`:
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  "http://localhost:5050/location/history?id=Alex"
+```
+
+```text
+Location history — Alex — 3 entries (newest first)
+------------------------------------------------------------------------
+2026-08-18 09:15:23.123    37.334606, -122.009102   Apple Park, Cupertino
+2026-08-17 20:04:55.545    51.501400,   -0.141900   Buckingham Palace
+2026-08-16 08:07:53.119    37.331800, -122.031200   -
+```
+
+- Everything is returned by default; `?n=<count>` caps it at the most recent
+  `count` entries and the header then reads `2 of 340 entries`.
+- Rows are **newest first**, in the order they were logged — the store is never
+  re-sorted by the `time` column, so an entry sent with a wrong clock stays where
+  it was logged.
+- The column shown is each entry's own `time`. An entry with no address shows `-`;
+  a hand-edited entry missing a coordinate shows `?` rather than breaking the
+  table.
+- `POST /webhook/location/history` returns the same text in the `message` field, for
+  callers that want a JSON body.
+
+### Purging old entries (`purge`)
+
+```bash
+# Delete Alex's entries older than 30 days
+curl -X POST http://localhost:5050/webhook/location/purge \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex", "days": 30}'
+```
+
+```json
+{
+    "status": "ok",
+    "id": "Alex",
+    "days": 30.0,
+    "cutoff": "2026-07-19 20:13:38.928",
+    "removed": 2,
+    "kept": 2,
+    "undated": 0,
+    "message": "Purged 2 entries older than 30 days for Alex; 2 kept."
+}
+```
+
+- **`days` defaults to 10** (`DEFAULT_DAYS` in `jobs/location_webhook.py`) and may be a
+  numeric string. Negatives, `nan` and non-numbers are refused; `0` is allowed and
+  means "everything up to now" (the file stays, empty).
+- Entries are aged by **`recorded_at`**, the timestamp this server wrote, falling
+  back to the caller's `time` only if `recorded_at` is missing. A phone with a
+  wrong clock therefore cannot talk the server into deleting fresh data.
+- An entry whose timestamp cannot be parsed at all is **kept** and counted in
+  `undated` — deleting data the server cannot date would be worse than keeping it.
+- It only ever touches the one id's file. There is no GET form: purging is
+  destructive, so it is POST-with-the-secret only.
+- To run it on a schedule, point cron (or a Home Assistant automation) at the
+  webhook:
+
+  ```bash
+  # 04:00 daily, keep the last 30 days
+  0 4 * * * curl -sS -X POST http://localhost:5050/webhook/location/purge \
+    -H "Content-Type: application/json" \
+    -H "X-Webhook-Secret: your-shared-secret-here" -d '{"id": "Alex", "days": 30}'
+  ```
+
+### Opening it in Maps from an iPhone Shortcut
+
+The response's `maps_url` is a ready-to-open Apple Maps link, so the Shortcut is
+three actions:
+
+1. **Get Contents of URL** — `https://<your-server>/location?id=Alex`, method
+   `GET`, with header `X-Webhook-Secret: your-shared-secret-here`.
+2. **Get Dictionary Value** — key `maps_url` (or `google_maps_url` to open Google
+   Maps instead).
+3. **Open URLs** — Maps opens on the pin, labelled with the address.
+
+To log a position from the phone instead, use **Get Current Location** and POST
+its `Latitude` / `Longitude` to `/webhook/location/log`.
+
 ## Configuration
 
 **`configs/config.json`** maps webhook paths to job modules:
@@ -300,6 +592,17 @@ authenticated webhook. It is gitignored — copy it from the example and fill it
 }
 ```
 
+**`configs/location_notify_config.json`** holds one on/off switch per person for
+the notification a logged position sends (see
+[Notifying your phone](#notifying-your-phone-per-person)). It is created
+automatically and updated through the `/location/notify` endpoints:
+
+```json
+{
+    "ids": { "Alex": true }
+}
+```
+
 **`configs/job_config.json`** tracks which jobs are enabled. It is created automatically
 and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
@@ -320,6 +623,7 @@ python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
 python3 tests/test_notify_phone.py          # phone notification job tests
 python3 tests/test_presence_webhook.py      # presence read/write webhook tests
+python3 tests/test_location.py              # location log/fetch/history/purge + notify tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
 
@@ -328,7 +632,10 @@ python3 app.py --debug                      # then hit endpoints with curl
 Webhooks with `"require_secret": true`, every state-changing management
 endpoint (`/jobs/{name}/enable|disable|toggle` and
 `/logs/{type}/enable|disable|toggle`), reading log contents
-(`/logs/{type}/read`), and reading presence (`GET /presence`) require the shared
+(`/logs/{type}/read`), reading presence (`GET /presence`), reading a logged
+location (`GET /location`, `GET /location/history`) and the location-notification
+switches (`GET /location/notify`, `/location/notify/{id}/enable|disable|toggle`)
+require the shared
 secret (from `configs/webhook_secret.json`) in
 the `X-Webhook-Secret` header; requests without it get `401`. The remaining
 read-only endpoints (`GET /jobs`, `GET /logs`, `/health`) are open. Use a

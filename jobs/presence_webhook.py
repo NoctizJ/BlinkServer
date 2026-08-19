@@ -34,7 +34,6 @@ bad payload gets a JSON error instead of a 500.
 """
 
 import logging
-import unicodedata
 from typing import Any, Dict, Optional
 
 try:
@@ -48,6 +47,7 @@ try:
         resolve_person,
         set_state,
     )
+    from jobs.text_format import display_width, pad, rule
 except ImportError:  # pragma: no cover - allows running this file directly
     from log_engine import log as write_log
     from presence_state import (
@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
         resolve_person,
         set_state,
     )
+    from text_format import display_width, pad, rule
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +86,6 @@ def _normalize_state(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     return STATE_ALIASES.get(value.strip().lower())
-
-
-def _display_width(text: str) -> int:
-    """Width of text in terminal columns.
-
-    Wide/fullwidth characters (e.g. "娜") occupy two columns, so plain len()
-    would misalign the columns of the formatted summary.
-    """
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
-
-
-def _pad(text: str, width: int) -> str:
-    """Left-align text in a field of the given display width."""
-    return text + " " * max(0, width - _display_width(text))
 
 
 def _describe(entry: Dict[str, Any]) -> str:
@@ -140,10 +127,10 @@ def format_presence(people: Dict[str, Any], person: Optional[str] = None) -> str
     home = sorted(n for n, e in people.items() if e.get("state") == STATE_HOME)
     away = sorted(n for n, e in people.items() if e.get("state") == STATE_AWAY)
 
-    name_width = max(_display_width(n) for n in people)
-    state_width = max(_display_width(e.get("state") or "unknown") for e in people.values())
+    name_width = max(display_width(n) for n in people)
+    state_width = max(display_width(e.get("state") or "unknown") for e in people.values())
     rows = [
-        f"{_pad(name, name_width)}  {_pad(entry.get('state') or 'unknown', state_width)}  "
+        f"{pad(name, name_width)}  {pad(entry.get('state') or 'unknown', state_width)}  "
         f"since {entry.get('last_updated') or 'unknown'}"
         + (f"  ({entry['event']})" if entry.get("event") else "")
         for name, entry in sorted(people.items())
@@ -153,9 +140,8 @@ def format_presence(people: Dict[str, Any], person: Optional[str] = None) -> str
     header = f"Presence — {count} {'person' if count == 1 else 'people'}"
     summary = [f"Home ({len(home)}): {', '.join(home) or '-'}",
                f"Away ({len(away)}): {', '.join(away) or '-'}"]
-    rule = "-" * max(_display_width(line) for line in [header] + summary + rows)
 
-    return "\n".join([header, rule] + summary + [""] + rows)
+    return "\n".join([header, rule([header] + summary + rows)] + summary + [""] + rows)
 
 
 def read(payload: Dict[str, Any] = None) -> Dict[str, Any]:
