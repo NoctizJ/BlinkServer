@@ -11,6 +11,7 @@
   },
   "location_log": {
     "title": "位置情報を記録",
-    "message": "{id} is at {address} ({time})."
+    "message": "{id} is at {address} ({time}).",
+    "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
   }
 }

@@ -21,12 +21,16 @@ Four webhooks share this module (see config.json):
         "latitude": 37.334606,                  # required
         "longitude": -122.009102,               # required
         "address": "Apple Park, Cupertino",     # optional
-        "time": "2026-08-18 09:15:23.123"       # optional - defaults to now
+        "time": "2026-08-18 09:15:23.123",      # optional - defaults to now
+        "trigger": "arrived home"               # optional - why it was logged
     }
 
 ``latitude``/``longitude`` also accept the aliases ``lat`` and ``lon``/``lng``/
 ``long``, and may arrive as numeric strings (Shortcuts sends text). ``time`` is
-stored verbatim, in whatever format the caller uses.
+stored verbatim, in whatever format the caller uses. ``trigger`` (alias
+``reason``) is free text describing what caused the log — "arrived home",
+"periodic", "manual" — and shows up in the response message, the notification and
+the history.
 
 ``fetch`` returns the latest position as JSON, with a ready-to-open map link for
 Apple Maps (``maps_url``) and one for Google Maps (``google_maps_url``). Pass
@@ -94,6 +98,9 @@ DEFAULT_RECORDS = 10
 
 # Friendly spellings for `purge`'s "how many to keep" input.
 RECORDS_KEYS = ("records", "keep")
+
+# Friendly spellings for `log`'s optional "why was this logged" input.
+TRIGGER_KEYS = ("trigger", "reason")
 
 # Shown in the history table for an entry with no address, and in place of a
 # coordinate that a hand-edited file left out.
@@ -319,6 +326,7 @@ def format_history(
     rows = [
         pad(time, time_width) + _GAP + _pair(entry) + _GAP
         + str(entry.get("address") or NO_ADDRESS)
+        + (f"  [{entry['trigger']}]" if entry.get("trigger") else "")
         for time, entry in zip(times, entries)
     ]
 
@@ -350,10 +358,11 @@ def log(payload: Dict[str, Any] = None) -> Dict[str, Any]:
 
     person = resolve_person(payload)
     address = _text(payload.get("address"))
+    trigger = _text(_first(payload, TRIGGER_KEYS))
 
     try:
         entry = append_location(person, latitude, longitude, address=address,
-                                time=_text(payload.get("time")))
+                                time=_text(payload.get("time")), trigger=trigger)
     except Exception as e:  # unwritable state dir, unusable id, ...
         return _failed("Location write failed", person, e)
 
@@ -368,7 +377,8 @@ def log(payload: Dict[str, Any] = None) -> Dict[str, Any]:
         "notify": notify_location(person, entry, map_url=apple_link, payload=payload),
         "message": f"Logged {person} at {latitude},{longitude}"
                    + (f" ({address})" if address else "")
-                   + f" at {entry['time']}",
+                   + f" at {entry['time']}"
+                   + (f"; trigger: {trigger}" if trigger else ""),
     }
 
 
@@ -399,6 +409,7 @@ def fetch(payload: Dict[str, Any] = None) -> Dict[str, Any]:
         "address": None,
         "time": None,
         "recorded_at": None,
+        "trigger": None,
         "maps_url": None,
         "google_maps_url": None,
         "message": f"{person}: no location logged yet.",
@@ -407,7 +418,7 @@ def fetch(payload: Dict[str, Any] = None) -> Dict[str, Any]:
 
     if entry is not None:
         latitude, longitude = entry.get("latitude"), entry.get("longitude")
-        address = entry.get("address")
+        address, trigger = entry.get("address"), entry.get("trigger")
         # A hand-edited file may be missing coordinates; then there is no pin to
         # open, but the rest of the entry is still worth returning.
         plottable = _is_number(latitude) and _is_number(longitude)
@@ -417,10 +428,12 @@ def fetch(payload: Dict[str, Any] = None) -> Dict[str, Any]:
             "address": address,
             "time": entry.get("time"),
             "recorded_at": entry.get("recorded_at"),
+            "trigger": trigger,
             "maps_url": maps_url(latitude, longitude, address or person) if plottable else None,
             "google_maps_url": google_maps_url(latitude, longitude) if plottable else None,
             "message": f"{person} was at {address or f'{latitude},{longitude}'} "
-                       f"at {entry.get('time')}",
+                       f"at {entry.get('time')}"
+                       + (f" ({trigger})" if trigger else ""),
         })
 
     count = _count(payload.get("n") if isinstance(payload, dict) else None)

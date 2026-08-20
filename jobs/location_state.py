@@ -13,14 +13,16 @@ history never sits in another's (or in the shared text logs). Each id gets
           "longitude": -122.009102,
           "address": "Apple Park, Cupertino",
           "time": "2026-08-18 09:15:23.123",
-          "recorded_at": "2026-08-18 09:15:23.980"
+          "recorded_at": "2026-08-18 09:15:23.980",
+          "trigger": "arrived home"
         }
       ],
       "last_modified": "2026-08-18 09:15:23.980"
     }
 
 ``time`` is the caller's own timestamp, stored verbatim (never reformatted);
-``recorded_at`` is when this server wrote the entry. Entries are appended, so
+``recorded_at`` is when this server wrote the entry; ``trigger`` is the caller's
+own reason for logging it (null when they did not say). Entries are appended, so
 the newest is last and "latest" means *most recently logged* — not the largest
 ``time``. Each file keeps at most :data:`MAX_ENTRIES` entries; older ones are
 dropped so a chatty phone cannot grow the file without bound.
@@ -32,7 +34,8 @@ for presence (a post with no ``id`` is attributed to ``娜``).
 Usage:
     from jobs.location_state import append_location, latest_location
 
-    append_location("娜", 37.334606, -122.009102, address="Apple Park")
+    append_location("娜", 37.334606, -122.009102, address="Apple Park",
+                    trigger="arrived home")
     latest_location("娜")     # -> {"latitude": 37.334606, ...} or None
 
 Reading a caller's payload (coordinates, ``n``, ``days``) and rendering it
@@ -168,11 +171,13 @@ def append_location(
     longitude: float,
     address: Optional[str] = None,
     time: Optional[str] = None,
+    trigger: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Append one position to ``person``'s file and return the stored entry.
 
-    ``time`` defaults to now and is stored verbatim otherwise; ``address`` may
-    be None. The file is trimmed to the newest :data:`MAX_ENTRIES` entries.
+    ``time`` defaults to now and is stored verbatim otherwise; ``address`` and
+    ``trigger`` — why this position was logged, e.g. "arrived home" — may both be
+    None. The file is trimmed to the newest :data:`MAX_ENTRIES` entries.
     """
     store = load_locations(person)
     stamp = _now()
@@ -182,12 +187,14 @@ def append_location(
         "address": address,
         "time": time or stamp,
         "recorded_at": stamp,
+        "trigger": trigger,
     }
     entries = store.setdefault("entries", [])
     entries.append(entry)
     del entries[:-MAX_ENTRIES]  # keep the newest MAX_ENTRIES; a no-op under the cap
     save_locations(person, store)
-    logger.debug("Location: %s at %s,%s (%s)", person, latitude, longitude, address)
+    logger.debug("Location: %s at %s,%s (%s) trigger=%s",
+                 person, latitude, longitude, address, trigger)
     return entry
 
 

@@ -176,6 +176,94 @@ def test_history_edge_cases():
     print("  OK: empty, capped, singular and odd histories all render")
 
 
+def test_trigger_is_stored_and_shown_everywhere():
+    """An optional trigger reaches the store, both readers and the notification."""
+    print("Testing the trigger reason...")
+    with temp_location_dir():
+        res = lw.log({"id": "Alex", **APPLE_PARK, "time": "2026-08-18 09:15:23.123",
+                      "trigger": "arrived home"})
+        assert res["location"]["trigger"] == "arrived home", res
+        assert res["message"] == (
+            "Logged Alex at 37.334606,-122.009102 (Apple Park) "
+            "at 2026-08-18 09:15:23.123; trigger: arrived home"), res["message"]
+
+        # Stored, so it survives a reload.
+        assert ls.latest_location("Alex")["trigger"] == "arrived home"
+
+        # fetch returns it and mentions it.
+        got = lw.fetch({"id": "Alex"})
+        assert got["trigger"] == "arrived home", got
+        assert got["message"] == (
+            "Alex was at Apple Park at 2026-08-18 09:15:23.123 (arrived home)"), got["message"]
+
+        # The notification uses the with-trigger template.
+        title, message = ln.notify_phone.call_args[0]
+        assert message == (
+            "Alex is at Apple Park (2026-08-18 09:15:23.123) — arrived home."), message
+
+        # The history table shows it in brackets after the address.
+        lw.log({"id": "Alex", "latitude": 1, "longitude": 2, "reason": "periodic"})  # alias
+        table = lw.history({"id": "Alex"})["message"]
+        print("\n" + table + "\n")
+        assert "[periodic]" in table and "[arrived home]" in table, table
+        assert ls.latest_location("Alex")["trigger"] == "periodic"
+    print("  OK: trigger stored, in both messages, the notification and the table")
+
+
+def test_trigger_is_optional_everywhere():
+    """Without a trigger nothing gains a dangling clause or a stray bracket."""
+    print("Testing a position with no trigger...")
+    with temp_location_dir():
+        res = lw.log({"id": "Alex", **APPLE_PARK, "time": "2026-08-18 09:15:23.123"})
+        assert res["location"]["trigger"] is None, res
+        assert res["message"].endswith("at 2026-08-18 09:15:23.123"), res["message"]
+        assert "trigger" not in res["message"], res["message"]
+
+        got = lw.fetch({"id": "Alex"})
+        assert got["trigger"] is None, got
+        assert got["message"] == "Alex was at Apple Park at 2026-08-18 09:15:23.123", got
+
+        # The plain template, with no trailing dash.
+        assert ln.notify_phone.call_args[0][1] == (
+            "Alex is at Apple Park (2026-08-18 09:15:23.123)."), ln.notify_phone.call_args
+        assert "[" not in lw.history({"id": "Alex"})["message"]
+
+        # Blank triggers count as absent, and so do entries predating the field.
+        for blank in ("", "   ", None):
+            assert lw.log({"id": "Sam", "latitude": 1, "longitude": 2,
+                           "trigger": blank})["location"]["trigger"] is None, blank
+        ls.save_locations("Kim", {"entries": [{"latitude": 1, "longitude": 2,
+                                              "time": "2026-08-18 09:15:23.123"}]})
+        assert lw.fetch({"id": "Kim"})["trigger"] is None
+        assert "[" not in lw.history({"id": "Kim"})["message"]
+    print("  OK: absent/blank triggers leave every surface clean")
+
+
+def test_trigger_notification_templates_are_configurable():
+    """message_with_trigger can be overridden per request and in the config."""
+    print("Testing the trigger notification templates...")
+    configured = {"message": "{id} at {address}",
+                  "message_with_trigger": "{id} at {address} because {trigger}"}
+    with temp_location_dir(), mock.patch.object(ln, "load_event_text", return_value=configured):
+        lw.log({"id": "Alex", **APPLE_PARK, "trigger": "arrived home"})
+        assert ln.notify_phone.call_args[0][1] == "Alex at Apple Park because arrived home"
+
+        lw.log({"id": "Alex", **APPLE_PARK})           # no trigger -> plain template
+        assert ln.notify_phone.call_args[0][1] == "Alex at Apple Park"
+
+        # A request may override it, and {trigger} works in any template.
+        lw.log({"id": "Alex", **APPLE_PARK, "trigger": "manual",
+                "message_with_trigger": "why: {trigger} / where: {address}"})
+        assert ln.notify_phone.call_args[0][1] == "why: manual / where: Apple Park"
+
+    # With only `message` configured, a triggered position falls back to it.
+    with temp_location_dir(), mock.patch.object(ln, "load_event_text",
+                                                return_value={"message": "{id}: {trigger}"}):
+        lw.log({"id": "Alex", **APPLE_PARK, "trigger": "arrived home"})
+        assert ln.notify_phone.call_args[0][1] == "Alex: arrived home"
+    print("  OK: with-trigger template configurable, falls back to message")
+
+
 def test_webhook_accepts_query_params_and_a_headerless_body():
     """A webhook's inputs work as query params, and without a JSON header.
 
@@ -867,6 +955,9 @@ if __name__ == "__main__":
     test_notification_endpoints()
     test_history_formats_all_entries_as_text()
     test_history_edge_cases()
+    test_trigger_is_stored_and_shown_everywhere()
+    test_trigger_is_optional_everywhere()
+    test_trigger_notification_templates_are_configurable()
     test_webhook_accepts_query_params_and_a_headerless_body()
     test_purge_keeps_the_most_recent_records_by_default()
     test_purge_records_wins_over_days()

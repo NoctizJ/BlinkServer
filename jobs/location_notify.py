@@ -32,13 +32,17 @@ The title and message live with every other notification's text, in
 
     "location_log": {
       "title": "位置情報を記録",
-      "message": "{id} is at {address} ({time})."
+      "message": "{id} is at {address} ({time}).",
+      "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
     }
 
 Available placeholders: ``{id}``/``{name}``, ``{address}``, ``{latitude}``,
-``{longitude}``, ``{time}`` and ``{maps_url}``. ``{address}`` falls back to the
-coordinates when the logged position had no address. A request may override
-``title``/``message`` per call, so precedence matches the other notifying job:
+``{longitude}``, ``{time}``, ``{trigger}`` and ``{maps_url}``. ``{address}`` falls
+back to the coordinates when the logged position had no address, and ``{trigger}``
+is empty when the caller gave no reason — which is why a position that *has* a
+trigger uses ``message_with_trigger`` instead, so neither version reads with a
+dangling clause. A request may override ``title``/``message``/
+``message_with_trigger`` per call, so precedence matches the other notifying job:
 payload > notify_config.json > built-in default.
 
 Nothing here raises: a notification that cannot be sent is reported in the
@@ -69,8 +73,14 @@ MASTER_SWITCH = "notify_phone"
 # The notify_config.json key holding this notification's title and message.
 EVENT = "location_log"
 
-# Used when notify_config.json has no "location_log" entry.
-DEFAULT_TEXT = {"title": "位置情報を記録", "message": "{id} is at {address} ({time})."}
+# Used when notify_config.json has no "location_log" entry. `message_with_trigger`
+# is used instead of `message` when the logged position carries a trigger, so the
+# text reads properly either way.
+DEFAULT_TEXT = {
+    "title": "位置情報を記録",
+    "message": "{id} is at {address} ({time}).",
+    "message_with_trigger": "{id} is at {address} ({time}) — {trigger}.",
+}
 
 
 def enabled_for(person: str) -> bool:
@@ -88,6 +98,11 @@ def set_enabled_for(person: str, enabled: bool) -> bool:
 def all_enabled() -> Dict[str, bool]:
     """Return every person's switch, keyed by id."""
     return all_switches(SWITCH_FILE, IDS_SECTION)
+
+
+def _first_text(source: Dict[str, Any], fields: tuple) -> Optional[str]:
+    """Return the first of ``fields`` that ``source`` actually sets."""
+    return next((source[field] for field in fields if source.get(field)), None)
 
 
 def _skipped(message: str) -> Dict[str, Any]:
@@ -114,6 +129,7 @@ def notify_location(
         return _skipped(f"location notifications are off for {person}")
 
     latitude, longitude = entry.get("latitude"), entry.get("longitude")
+    trigger = entry.get("trigger")
     values = {
         "id": person,
         "name": person,
@@ -121,17 +137,26 @@ def notify_location(
         "latitude": latitude,
         "longitude": longitude,
         "time": entry.get("time"),
+        "trigger": trigger or "",
         "maps_url": map_url or "",
     }
+
+    # An entry with a trigger uses the `message_with_trigger` template, falling
+    # back to `message` when nobody configured one.
+    message_fields = ("message_with_trigger", "message") if trigger else ("message",)
 
     # Precedence: payload > notify_config.json > built-in default.
     payload = payload if isinstance(payload, dict) else {}
     configured = load_event_text(EVENT)
     text = {
-        field: fill_placeholders(
-            payload.get(field) or configured.get(field) or DEFAULT_TEXT[field], values
-        )
-        for field in ("title", "message")
+        "title": fill_placeholders(
+            payload.get("title") or configured.get("title") or DEFAULT_TEXT["title"], values
+        ),
+        "message": fill_placeholders(
+            _first_text(payload, message_fields)
+            or _first_text(configured, message_fields)
+            or _first_text(DEFAULT_TEXT, message_fields), values
+        ),
     }
 
     try:

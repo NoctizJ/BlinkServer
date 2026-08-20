@@ -324,6 +324,7 @@ curl -H "X-Webhook-Secret: your-shared-secret-here" \
     "address": "Apple Park, Cupertino",
     "time": "2026-08-18 09:15:23.123",
     "recorded_at": "2026-08-18 09:15:23.980",
+    "trigger": "arrived home",
     "maps_url": "https://maps.apple.com/?ll=37.334606,-122.009102&q=Apple+Park%2C+Cupertino",
     "google_maps_url": "https://www.google.com/maps?q=37.334606,-122.009102",
     "message": "Alex was at Apple Park, Cupertino at 2026-08-18 09:15:23.123",
@@ -340,10 +341,34 @@ curl -H "X-Webhook-Secret: your-shared-secret-here" \
 | `longitude` | **yes**  | −180…180; also accepts `lon` / `lng` / `long`                 |
 | `address`   | no       | Free text; becomes the Maps pin label. Stored as `null` if omitted |
 | `time`      | no       | The caller's own timestamp, stored **verbatim**; defaults to now |
+| `trigger`   | no       | Why it was logged — "arrived home", "periodic", "manual". Alias `reason` |
 
 A missing or out-of-range coordinate is reported as a JSON error and nothing is
 written. Coordinates may arrive as strings, because Shortcuts sends every field
 as text.
+
+**`trigger`** is free text saying what caused the log, and once given it follows
+the entry everywhere:
+
+```bash
+curl -X POST http://localhost:5050/webhook/location/log \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Alex", "latitude": 37.334606, "longitude": -122.009102,
+       "address": "Apple Park", "trigger": "arrived home"}'
+```
+
+| Surface | With a trigger |
+| --- | --- |
+| the `log` response `message` | `Logged Alex at 37.334606,-122.009102 (Apple Park) at … ; trigger: arrived home` |
+| the phone notification | `Alex is at Apple Park (…) — arrived home.` |
+| `GET /location` | a `trigger` field, and `… at … (arrived home)` in `message` |
+| `GET /location/history` | `Apple Park  [arrived home]` at the end of the row |
+| `state/<id>_loc.json` | a `"trigger"` field on the entry |
+
+Leave it out and every one of those reads exactly as it did before — no empty
+brackets, no dangling dash. Blank strings count as "not given", and entries logged
+before this field existed read back as `null`.
 
 ### Notifying your phone (per person)
 
@@ -399,16 +424,21 @@ curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
   ```json
   "location_log": {
       "title": "位置情報を記録",
-      "message": "{id} is at {address} ({time})."
+      "message": "{id} is at {address} ({time}).",
+      "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
   }
   ```
+
+  `message_with_trigger` is used when the logged position carries a `trigger`, and
+  `message` when it does not — that way neither version ends up with an empty
+  clause. If you only set `message`, a triggered position falls back to it.
 
   which arrives as **位置情報を記録** / *Alex is at Apple Park, Cupertino
   (2026-08-18 09:15:23.123).* Only this event's title is Japanese —
   `leaving_home` and `arriving_home` keep their own text.
 
   Placeholders: `{id}`/`{name}`, `{address}`, `{latitude}`, `{longitude}`,
-  `{time}` and `{maps_url}`. `{address}` falls back to the coordinates when the
+  `{time}`, `{trigger}` and `{maps_url}`. `{address}` falls back to the coordinates when the
   logged position had none, and `{time}` is the entry's own timestamp — the one
   the caller sent, or the moment the server stored it. A request may override `title`/`message` per call, so
   precedence matches the notify webhooks: payload > `notify_config.json` >
@@ -434,7 +464,8 @@ runtime state):
             "longitude": -122.009102,
             "address": "Apple Park, Cupertino",
             "time": "2026-08-18 09:15:23.123",
-            "recorded_at": "2026-08-18 09:15:23.980"
+            "recorded_at": "2026-08-18 09:15:23.980",
+            "trigger": "arrived home"
         }
     ],
     "last_modified": "2026-08-18 09:15:23.980"
