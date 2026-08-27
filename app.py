@@ -26,6 +26,13 @@ from jobs.log_engine import (
     MASTER_SWITCH,
 )
 from jobs.presence_webhook import read as read_presence
+from jobs.location_webhook import fetch as fetch_location, history as location_history_text
+from jobs.location_notify import (
+    MASTER_SWITCH as NOTIFY_MASTER_SWITCH,
+    all_enabled as all_location_notify,
+    enabled_for as location_notify_enabled,
+    set_enabled_for as set_location_notify_for,
+)
 
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
@@ -128,6 +135,30 @@ def get_job_enabled_status(job_name):
     return job_config.get("jobs", {}).get(job_name, True)  # Default to enabled
 
 
+# Content types whose body belongs to the job itself: the upload webhook reads
+# the multipart request directly (see jobs/file_upload.py), and reading the body
+# as JSON here would consume the stream before it gets the chance.
+FORM_MIMETYPES = ("multipart/form-data", "application/x-www-form-urlencoded")
+
+
+def webhook_payload():
+    """Build a job's payload from the request's query string and JSON body.
+
+    Inputs may arrive either way and the body wins, so
+    `POST /webhook/location/purge?records=3` and the same field in a JSON body
+    are equivalent. The body is parsed with `force=True` because a caller that
+    forgets `Content-Type: application/json` would otherwise have it silently
+    dropped — and a dropped field means a job runs with its defaults instead of
+    what was asked for.
+    """
+    body = {}
+    if request.mimetype not in FORM_MIMETYPES:
+        body = request.get_json(silent=True, force=True) or {}
+    if not isinstance(body, dict):  # a JSON list/string body is not a payload
+        body = {}
+    return {**request.args.to_dict(), **body}
+
+
 def make_handler(hook):
     module_name = hook["module"]
     function_name = hook.get("function", "run")
@@ -139,7 +170,7 @@ def make_handler(hook):
             if error:
                 return error
 
-        payload = request.get_json(silent=True) or {}
+        payload = webhook_payload()
 
         # Check if job is enabled
         job_name = module_name.split('.')[-1]  # Get the job name from module path
@@ -358,6 +389,86 @@ def presence():
     if fmt == "json":
         return jsonify(result)
     return Response(result["message"] + "\n", mimetype="text/plain")
+
+
+# Location endpoints
+#
+# Readers for the locations written by POST /webhook/location/log, exposed over
+# GET so an iPhone Shortcut (or any GET-only tool) can fetch a person's position
+# and hand `maps_url` straight to Maps. Writing a position stays POST-only, on
+# /webhook/location/log, and so does purging, on /webhook/location/purge.
+@app.route("/location", methods=["GET", "POST"])
+@require_webhook_secret
+def location():
+    """Return a person's most recently logged location as JSON.
+
+    Use `?id=<person>` to choose whom to look up (defaults to the store's
+    default person) and `?n=<count>` to include the recent history. An id with
+    nothing logged yet comes back as `"found": false` with null fields, not a
+    404, so a Shortcut sees a normal response.
+    """
+    return jsonify(fetch_location(webhook_payload()))
+
+
+# The history for the same store, as plain text rather than JSON — like
+# /logs/{type}/read and GET /presence, the body is the formatted table itself,
+# ready to display. Everything is returned unless ?n= caps it.
+@app.route("/location/history", methods=["GET", "POST"])
+@require_webhook_secret
+def location_history():
+    """Return a person's whole location history as a plain text table.
+
+    Use `?id=<person>` to choose whom to look up (defaults to the store's
+    default person) and `?n=<count>` for only the most recent entries.
+    """
+    result = location_history_text(webhook_payload())
+    return Response(result["message"] + "\n", mimetype="text/plain")
+
+
+# Per-person switches for the phone notification that POST /webhook/location/log
+# sends. These mirror the /logs/{type}/* switches: one entry per id in
+# configs/location_notify_config.json, under the master `notify_phone` job
+# switch. A person nobody has toggled yet is on.
+@app.route("/location/notify", methods=["GET"])
+@require_webhook_secret
+def list_location_notify():
+    """List each person's location-notification switch, and the master switch."""
+    people = [{"id": person, "enabled": enabled}
+              for person, enabled in sorted(all_location_notify().items())]
+    return jsonify({
+        "master": {"job": NOTIFY_MASTER_SWITCH,
+                   "enabled": get_job_enabled_status(NOTIFY_MASTER_SWITCH)},
+        "ids": people,
+    })
+
+
+def set_location_notify(person, enabled):
+    """Persist one person's location-notification switch and describe it."""
+    set_location_notify_for(person, enabled)
+    action = "enabled" if enabled else "disabled"
+    return jsonify({"status": "ok", "id": person, "enabled": enabled,
+                    "message": f"Location notifications for {person} {action}"})
+
+
+@app.route("/location/notify/<person>/enable", methods=["POST"])
+@require_webhook_secret
+def enable_location_notify(person):
+    """Turn on the location notification for one person."""
+    return set_location_notify(person, True)
+
+
+@app.route("/location/notify/<person>/disable", methods=["POST"])
+@require_webhook_secret
+def disable_location_notify(person):
+    """Turn off the location notification for one person."""
+    return set_location_notify(person, False)
+
+
+@app.route("/location/notify/<person>/toggle", methods=["POST"])
+@require_webhook_secret
+def toggle_location_notify(person):
+    """Flip the location notification for one person."""
+    return set_location_notify(person, not location_notify_enabled(person))
 
 
 config = load_config()

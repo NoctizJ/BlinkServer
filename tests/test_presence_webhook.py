@@ -105,7 +105,7 @@ def test_read_message_is_displayable():
         assert lines[6].startswith(f"{ps.DEFAULT_PERSON}"), lines
 
         # The rule spans the widest line, counting 娜 as two columns.
-        assert len(lines[1]) == max(pw._display_width(l) for l in lines), lines
+        assert len(lines[1]) == max(pw.display_width(l) for l in lines), lines
 
         # Single-person reads get a one-line message; unknown people say so.
         one = pw.read({"id": "Alex"})["message"]

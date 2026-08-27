@@ -53,6 +53,30 @@
       "module": "jobs.presence_webhook",
       "function": "write",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/location/log",
+      "module": "jobs.location_webhook",
+      "function": "log",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/location/fetch",
+      "module": "jobs.location_webhook",
+      "function": "fetch",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/location/history",
+      "module": "jobs.location_webhook",
+      "function": "history",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/location/purge",
+      "module": "jobs.location_webhook",
+      "function": "purge",
+      "require_secret": true
     }
   ]
 }

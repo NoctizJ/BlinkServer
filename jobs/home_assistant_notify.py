@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Home Assistant phone-notification helper for Blink Server.
 
-This is the reusable wrapper around a single Home Assistant `notify` service
-call. Any job can import notify_phone() to push a notification (title +
-message) to a phone running the Home Assistant app.
+This is the reusable notification plumbing: a single Home Assistant `notify`
+service call, plus the title/message configuration every notifying job shares.
+Any job can import notify_phone() to push a notification (title + message) to a
+phone running the Home Assistant app.
 
-It mirrors this request:
+The service call mirrors this request:
 
     curl -X POST \\
       -H "Authorization: Bearer <YOUR_TOKEN>" \\
       -H "Content-Type: application/json" \\
       http://<hostID>:8123/api/services/notify/<HA_NOTIFY_TARGET> \\
       -d '{"title": "...", "message": "..."}'
+
+Titles and messages come from **configs/notify_config.json**, keyed by event
+(``leaving_home``, ``arriving_home``, ``location_log``, ...) — read one with
+:func:`load_event_text` and fill its ``{id}``-style placeholders with
+:func:`fill_placeholders`. Who uses which event is up to the job:
+:mod:`jobs.notify_phone` owns the arrival/departure events and
+:mod:`jobs.location_notify` the location one.
 """
 
 import os
@@ -24,6 +32,40 @@ import requests
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "home_assistant_config.json")
+
+NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "notify_config.json")
+
+
+def load_event_text(event: str) -> Dict[str, Any]:
+    """Return an event's entry from notify_config.json, or ``{}``.
+
+    A missing file or a missing event is not an error — the calling job falls
+    back to its own built-in title/message. Unreadable JSON is logged and treated
+    the same way, so a typo in the config cannot cost you the notification.
+    """
+    try:
+        with open(NOTIFY_CONFIG_FILE, "r", encoding="utf-8") as f:
+            entry = json.load(f).get(event, {})
+    except FileNotFoundError:
+        logger.warning("notify_config.json not found; using defaults for %s", event)
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in notify_config.json: %s", e)
+        return {}
+    return entry if isinstance(entry, dict) else {}
+
+
+def fill_placeholders(text: Any, values: Dict[str, Any]) -> str:
+    """Replace ``{key}`` in text with ``values[key]``, for every key given.
+
+    Done with plain replacement rather than str.format() so stray braces in a
+    configured message can never raise, and so an unknown placeholder is left
+    visible in the notification instead of blowing up.
+    """
+    text = str(text)
+    for key, value in values.items():
+        text = text.replace(f"{{{key}}}", str(value))
+    return text
 
 
 def _load_ha_config() -> Dict[str, str]:

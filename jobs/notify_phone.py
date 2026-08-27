@@ -35,14 +35,12 @@ in notify_config.json. An incoming webhook payload may also override "title",
 payload > notify_config.json > built-in default.
 """
 
-import os
-import json
 import logging
 from typing import Dict, Any
 
 try:
     # Shared Home Assistant wrappers + logging engine.
-    from jobs.home_assistant_notify import notify_phone
+    from jobs.home_assistant_notify import fill_placeholders, load_event_text, notify_phone
     from jobs.home_assistant_arm_disarm import set_alarm
     from jobs.log_engine import log as write_log
     from jobs.presence_state import (
@@ -53,7 +51,7 @@ try:
         set_state,
     )
 except ImportError:  # pragma: no cover - allows running this file directly
-    from home_assistant_notify import notify_phone
+    from home_assistant_notify import fill_placeholders, load_event_text, notify_phone
     from home_assistant_arm_disarm import set_alarm
     from log_engine import log as write_log
     from presence_state import (
@@ -66,8 +64,6 @@ except ImportError:  # pragma: no cover - allows running this file directly
 
 logger = logging.getLogger(__name__)
 
-NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "notify_config.json")
-
 # The alarm action associated with each event, and its config-flag key.
 EVENT_ACTIONS = {"leaving_home": "arm", "arriving_home": "disarm"}
 
@@ -75,7 +71,7 @@ EVENT_ACTIONS = {"leaving_home": "arm", "arriving_home": "disarm"}
 EVENT_STATES = {"leaving_home": STATE_AWAY, "arriving_home": STATE_HOME}
 
 # Placeholders in a title/message that are replaced with the person's name.
-ID_PLACEHOLDERS = ("{id}", "{name}")
+ID_PLACEHOLDERS = ("id", "name")
 
 # Postfix appended to the notification title, describing the household once
 # this event is applied: "(A)" for arm (everybody is away), "(D)" for disarm (at
@@ -112,15 +108,8 @@ def _title_postfix(event: str, person: str) -> str:
 
 
 def _fill_person(text: Any, person: str) -> str:
-    """Replace the "{id}"/"{name}" placeholders in text with the person's name.
-
-    Done with plain replacement rather than str.format() so stray braces in a
-    configured message can never raise.
-    """
-    text = str(text)
-    for placeholder in ID_PLACEHOLDERS:
-        text = text.replace(placeholder, person)
-    return text
+    """Replace the "{id}"/"{name}" placeholders in text with the person's name."""
+    return fill_placeholders(text, {name: person for name in ID_PLACEHOLDERS})
 
 
 def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -134,14 +123,7 @@ def _load_event_config(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     defaults = DEFAULT_MESSAGES.get(event, {"title": "Notification", "message": ""})
     action = EVENT_ACTIONS.get(event)  # "arm", "disarm", or None
 
-    file_cfg: Dict[str, Any] = {}
-    try:
-        with open(NOTIFY_CONFIG_FILE, "r") as f:
-            file_cfg = json.load(f).get(event, {})
-    except FileNotFoundError:
-        logger.warning("notify_config.json not found; using defaults for %s", event)
-    except json.JSONDecodeError as e:
-        logger.error("Invalid JSON in notify_config.json: %s", e)
+    file_cfg = load_event_text(event)
 
     payload = payload if isinstance(payload, dict) else {}
     person = resolve_person(payload)
