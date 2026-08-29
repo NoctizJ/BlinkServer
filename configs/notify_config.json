@@ -1,12 +1,12 @@
 {
   "leaving_home": {
-    "title": "がいしゅつ",
-    "message": "{id}さんが家を出ました。お気をつけて！",
+    "title": "がいしゅつ {home}",
+    "message": "{id}さんが{home}を出ました。お気をつけて！",
     "arm": false
   },
   "arriving_home": {
-    "title": "きたく",
-    "message": "{id}さんが帰宅しました。アラームを解除しました。おかえりなさい！",
+    "title": "きたく {home}",
+    "message": "{id}さんが{home}に帰宅しました。アラームを解除しました。おかえりなさい！",
     "disarm": true
   },
   "location_log": {
