@@ -1,0 +1,31 @@
+{
+  "leaving_home": {
+    "title": "がいしゅつ",
+    "message": "{id}さんが家を出ました。お気をつけて！",
+    "arm": false,
+    "homes": {
+      "M": {
+        "title": "M — がいしゅつ",
+        "message": "{id}さんが{home}を出ました。お気をつけて！",
+        "arm": true
+      }
+    }
+  },
+  "arriving_home": {
+    "title": "きたく",
+    "message": "{id}さんが帰宅しました。アラームを解除しました。おかえりなさい！",
+    "disarm": true,
+    "homes": {
+      "M": {
+        "title": "M — きたく",
+        "message": "{id}さんが{home}に帰宅しました。おかえりなさい！",
+        "disarm": false
+      }
+    }
+  },
+  "location_log": {
+    "title": "位置情報を記録",
+    "message": "{id} is at {address} ({time}).",
+    "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
+  }
+}

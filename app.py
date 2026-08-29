@@ -378,12 +378,21 @@ def presence():
     """Return who is home and who is away as plain text.
 
     Mirrors `/logs/<type>/read`: the body is just the formatted summary, ready
-    to display. Use `?id=<person>` for a single person, and `?format=json` for
-    the structured payload (counts, home/away lists, raw entries) instead.
+    to display. Use `?id=<person>` for a single person, `?home=<home>` for a
+    house other than the default (`?home=all` for every house at once), and
+    `?format=json` for the structured payload (counts, home_id/away_id lists,
+    raw entries) instead.
     """
     body = request.get_json(silent=True) or {}
     person = request.args.get("id") or body.get("id")
-    result = read_presence({"id": person} if person else {})
+    home = request.args.get("home") or body.get("home")
+
+    payload = {}
+    if person:
+        payload["id"] = person
+    if home:
+        payload["home"] = home
+    result = read_presence(payload)
 
     fmt = (request.args.get("format") or body.get("format") or "").lower()
     if fmt == "json":
