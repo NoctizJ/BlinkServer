@@ -226,6 +226,157 @@ def test_id_fills_message_placeholder():
     print("  OK: {id} replaced with the person's name")
 
 
+def test_per_home_title_and_message():
+    """A "homes" block overrides the shared title/message for that home only."""
+    print("Testing per-home title/message overrides...")
+    file_cfg = {
+        "title": "Shared title",
+        "message": "Shared message for {id}",
+        "homes": {
+            "M": {"title": "M title", "message": "M message for {id}"},
+            "T": {"title": "T title only"},
+        },
+    }
+    with temp_presence_file(), \
+            mock.patch.object(np, "load_event_text", return_value=file_cfg), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        # No home -> the shared text.
+        np.leaving_home({"id": "Alex"})
+        assert sent.call_args[0] == ("Shared title (A)", "Shared message for Alex"), sent.call_args[0]
+
+        # Home M -> M's own text.
+        np.leaving_home({"id": "Sam", "home": "M"})
+        assert sent.call_args[0] == ("M title (A)", "M message for Sam"), sent.call_args[0]
+
+        # Home T overrides only the title, so the shared message is inherited.
+        np.leaving_home({"id": "Sam", "home": "T"})
+        assert sent.call_args[0] == ("T title only (A)", "Shared message for Sam"), sent.call_args[0]
+
+        # A home with no block at all falls back to the shared text.
+        np.leaving_home({"id": "Sam", "home": "Z"})
+        assert sent.call_args[0] == ("Shared title (A)", "Shared message for Sam"), sent.call_args[0]
+
+        # The payload still beats the home block.
+        np.leaving_home({"id": "Sam", "home": "M", "title": "Payload"})
+        assert sent.call_args[0][0] == "Payload (A)", sent.call_args[0]
+    print("  OK: per-home text used, partial blocks inherit, payload still wins")
+
+
+def test_home_placeholder_is_filled():
+    """"{home}" in a title/message is replaced with the home's name."""
+    print("Testing {home} placeholder substitution...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        np.arriving_home({"id": "Sam", "home": "M",
+                          "title": "{id} at {home}", "message": "{id} reached {home}"})
+        assert sent.call_args[0] == ("Sam at M (D)", "Sam reached M"), sent.call_args[0]
+
+        # With no home the placeholder resolves to the default.
+        np.arriving_home({"id": "Alex", "message": "{id} reached {home}"})
+        assert sent.call_args[0][1] == f"Alex reached {ps.DEFAULT_HOME}", sent.call_args[0]
+    print("  OK: {home} replaced with the home's name")
+
+
+def test_postfix_is_computed_per_home():
+    """Somebody home in one house never disarms another house's title."""
+    print("Testing the (A)/(D) postfix per home...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        # Sam is home in M. Home A is still empty.
+        np.arriving_home({"id": "Sam", "home": "M", "title": "Arriving"})
+        assert sent.call_args[0][0] == "Arriving (D)", sent.call_args[0]
+
+        # Alex leaving the default home empties it, even though M is occupied.
+        np.leaving_home({"id": "Alex", "home": ps.DEFAULT_HOME, "title": "Leaving"})
+        assert sent.call_args[0][0] == "Leaving (A)", sent.call_args[0]
+
+        # And leaving M empties M, even though it is a different house.
+        np.leaving_home({"id": "Sam", "home": "M", "title": "Leaving"})
+        assert sent.call_args[0][0] == "Leaving (A)", sent.call_args[0]
+
+        # Directly, too: the store has Alex home in A only.
+        ps.set_state("Alex", ps.STATE_HOME, event="arriving_home", home=ps.DEFAULT_HOME)
+        assert np._title_postfix("leaving_home", "Sam", ps.DEFAULT_HOME) == np.POSTFIX_DISARM
+        assert np._title_postfix("leaving_home", "Sam", "M") == np.POSTFIX_ARM
+        # The home argument defaults to DEFAULT_HOME, as before multi-home.
+        assert np._title_postfix("leaving_home", "Sam") == np.POSTFIX_DISARM
+    print("  OK: postfix counts only the event's own home")
+
+
+def test_per_home_arm_flag():
+    """A "homes" block can override the arm/disarm flag, including to false."""
+    print("Testing per-home arm/disarm flags...")
+    file_cfg = {
+        "title": "T",
+        "message": "M",
+        "arm": False,
+        "homes": {"M": {"arm": True}, "T": {"arm": False}},
+    }
+    with temp_presence_file(), \
+            mock.patch.object(np, "load_event_text", return_value=file_cfg), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}) as alarm, \
+            mock.patch.object(np, "write_log"):
+        # Shared config says don't arm.
+        np.leaving_home({"id": "Alex"})
+        alarm.assert_not_called()
+
+        # Home M turns it on.
+        np.leaving_home({"id": "Sam", "home": "M"})
+        alarm.assert_called_once_with("arm")
+
+        # Home T's explicit false is honored, not treated as unset.
+        alarm.reset_mock()
+        np.leaving_home({"id": "Sam", "home": "T"})
+        alarm.assert_not_called()
+
+        # The payload still beats the home block.
+        np.leaving_home({"id": "Sam", "home": "T", "arm": True})
+        alarm.assert_called_once_with("arm")
+    print("  OK: per-home arm flag overrides the shared one, false honored")
+
+
+def test_notify_persists_presence_in_the_named_home():
+    """leaving/arriving write into the home the payload names."""
+    print("Testing per-home presence persistence from notify...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        res = np.arriving_home({"id": "Sam", "home": "M"})
+        assert res["home"] == "M", res
+        assert res["presence"]["state"] == ps.STATE_HOME, res
+
+        res = np.leaving_home({"id": "Sam"})   # no home -> the default
+        assert res["home"] == ps.DEFAULT_HOME, res
+
+        assert ps.get_state("Sam", home="M")["state"] == ps.STATE_HOME
+        assert ps.get_state("Sam", home=ps.DEFAULT_HOME)["state"] == ps.STATE_AWAY
+        assert set(ps.all_homes()) == {ps.DEFAULT_HOME, "M"}, ps.all_homes()
+    print("  OK: presence written into the named home, default stays DEFAULT_HOME")
+
+
+def test_odd_homes_block_falls_back():
+    """A hand-mangled "homes" block is ignored rather than fatal."""
+    print("Testing recovery from an odd homes block...")
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(np, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(np, "write_log"):
+        for bad in ("nope", ["nope"], {"M": "nope"}, {"M": ["nope"]}):
+            with mock.patch.object(np, "load_event_text",
+                                   return_value={"title": "Shared", "message": "Body", "homes": bad}):
+                np.leaving_home({"id": "Sam", "home": "M"})
+                assert sent.call_args[0] == ("Shared (A)", "Body"), (bad, sent.call_args[0])
+    print("  OK: an unusable homes block falls back to the shared text")
+
+
 def test_presence_is_persisted_per_person():
     """Leaving marks a person away, arriving marks them home, in the JSON file."""
     print("Testing presence persistence...")
@@ -257,7 +408,7 @@ def test_presence_store_survives_a_corrupt_file():
     print("Testing presence store recovery from a bad file...")
     with temp_presence_file() as state_file:
         state_file.write_text("{not json", encoding="utf-8")
-        assert ps.load_state() == {"people": {}, "last_modified": None}
+        assert ps.load_state() == {"homes": {}, "last_modified": None}
         ps.set_state("Alex", ps.STATE_HOME, event="arriving_home")
         assert ps.get_state("Alex")["state"] == ps.STATE_HOME
 
@@ -281,6 +432,12 @@ if __name__ == "__main__":
     test_alarm_can_be_disabled_by_config()
     test_id_defaults_to_default_person()
     test_id_fills_message_placeholder()
+    test_per_home_title_and_message()
+    test_home_placeholder_is_filled()
+    test_postfix_is_computed_per_home()
+    test_per_home_arm_flag()
+    test_notify_persists_presence_in_the_named_home()
+    test_odd_homes_block_falls_back()
     test_presence_is_persisted_per_person()
     test_presence_store_survives_a_corrupt_file()
     print("\nAll notifyPhone tests passed!")

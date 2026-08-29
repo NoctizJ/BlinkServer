@@ -14,6 +14,10 @@ server code.
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 - Per-person home/away presence, persisted in `state/presence.json` and readable
   over HTTP (`/webhook/presence/read`)
+- Multiple homes — an optional `home` field on the leaving/arriving and presence
+  webhooks keeps a separate household, with its own notification text, in each
+  house; omit it and everything lands in the default home `AMS` — see
+  [Multiple homes](#multiple-homes)
 - Per-person location log — each id gets its own `state/<id>_loc.json`, written by
   `/webhook/location/log`, readable as JSON (ready for an iPhone Shortcut to open in
   Maps) or as a formatted text history, prunable by age, and able to notify your
@@ -67,11 +71,15 @@ event arms/disarms the alarm panel:
   position sends — see [Notifying your phone](#notifying-your-phone-per-person).
 - `{id}` (or `{name}`) in a title/message is replaced with the person's name —
   see [Who left / arrived](#who-left--arrived) below.
+- An optional `homes` block inside an event gives a named home its own title,
+  message, and arm/disarm flag, and `{home}` is replaced with the home's name —
+  see [Multiple homes](#multiple-homes). `configs/notify_config.example.json`
+  shows the shape.
 - Every title also ends in an **arm/disarm postfix** — see
   [Arm/disarm postfix](#armdisarm-postfix).
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
-  in its JSON body (payload wins over `configs/notify_config.json`, which wins over the
-  built-in defaults).
+  in its JSON body. Precedence is payload > the event's `homes` block for this
+  home > `configs/notify_config.json` > the built-in defaults.
 
 ### Arm/disarm postfix
 
@@ -92,15 +100,18 @@ Welcome home (D)     # arriving always leaves somebody home
 The postfix is appended whatever the title's source (payload, config, or
 built-in default), and is computed from `state/presence.json` with the current
 event's own state applied on top — so the last person leaving gets `(A)` even
-though the store is only written afterwards. It is a label for your automations
-and notifications; it does not itself arm or disarm the panel (the `arm` /
-`disarm` flags above do that). If the presence store cannot be read, the title
-is sent without a postfix rather than failing the notification.
+though the store is only written afterwards. Only the event's own home is
+counted, so somebody being home in another house never turns this one's postfix
+into `(D)`. It is a label for your automations and notifications; it does not
+itself arm or disarm the panel (the `arm` / `disarm` flags above do that). If
+the presence store cannot be read, the title is sent without a postfix rather
+than failing the notification.
 
 ### Who left / arrived
 
 `/webhook/notify/leaving` and `/webhook/notify/arriving` read the person's
-identity from an **`id`** field in the JSON body:
+identity from an **`id`** field in the JSON body, and the house from an
+optional **`home`** field:
 
 ```bash
 curl -X POST http://localhost:5050/webhook/notify/leaving \
@@ -109,25 +120,40 @@ curl -X POST http://localhost:5050/webhook/notify/leaving \
   -d '{"id": "Alex"}'
 ```
 
-A post with no `id` (or a blank one) is attributed to **`娜`**.
+A post with no `id` (or a blank one) is attributed to **`娜`**, and one with no
+`home` to **`AMS`** — see [Multiple homes](#multiple-homes).
 
-Each event is persisted per person in **`state/presence.json`**, so the current
-home/away state survives restarts. The file is created automatically and is
-gitignored (it is runtime state):
+Each event is persisted per home and per person in **`state/presence.json`**, so
+the current home/away state survives restarts. The file is created
+automatically and is gitignored (it is runtime state):
 
 ```json
 {
-    "people": {
-        "娜":  { "state": "home", "event": "arriving_home", "last_updated": "2026-08-03 18:42:11.482" },
-        "Alex": { "state": "away", "event": "leaving_home",  "last_updated": "2026-08-03 08:07:53.119" }
+    "homes": {
+        "AMS": {
+            "people": {
+                "娜":   { "state": "home", "event": "arriving_home", "last_updated": "2026-08-03 18:42:11.482" },
+                "Alex": { "state": "away", "event": "leaving_home",  "last_updated": "2026-08-03 08:07:53.119" }
+            }
+        },
+        "M": {
+            "people": {
+                "Sam": { "state": "home", "event": "arriving_home", "last_updated": "2026-08-19 09:12:00.001" }
+            }
+        }
     },
     "last_modified": "2026-08-03 18:42:11.482"
 }
 ```
 
 Leaving sets `"away"`, arriving sets `"home"`. Other jobs can read or write it
-through `jobs/presence_state.py` (`resolve_person`, `get_state`, `all_states`,
-`anyone_home`, `set_state`).
+through `jobs/presence_state.py` (`resolve_person`, `resolve_home`, `get_state`,
+`all_states`, `all_homes`, `anyone_home`, `set_state`). Every accessor takes an
+optional `home=` argument that defaults to `AMS`.
+
+> A presence file written before multi-home support — a top-level `people` map
+> with no `homes` — is read as home `AMS` and rewritten in the nested shape by the
+> next write. Nothing has to be converted by hand.
 
 The store is also reachable over HTTP. Reading is a plain **GET** that returns
 just the formatted text (like `/logs/{type}/read`); writing is a POST webhook.
@@ -153,9 +179,13 @@ Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
 curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?id=Alex"
 # -> Alex is away since 2026-08-03 20:04:55.545 (leaving_home)
 
+# Another house, or every house at once
+curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?home=M"
+curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?home=all"
+
 # Structured form, when you want the values rather than the text
 curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?format=json"
-# -> {"status":"ok","count":2,"home":["娜"],"away":["Alex"],"people":{…},"message":"Presence — 2 people\n…"}
+# -> {"status":"ok","home":"A","count":2,"home_id":["娜"],"away_id":["Alex"],"people":{…},"message":"Presence — 2 people\n…"}
 
 # The same reader as a POST webhook, for callers that prefer a JSON body
 curl -X POST http://localhost:5050/webhook/presence/read \
@@ -170,13 +200,14 @@ curl -X POST http://localhost:5050/webhook/presence/write \
 ```
 
 - `GET /presence` — plain text by default; `?id=<person>` for one person,
-  `?format=json` for the structured payload. Also accepts POST with the same
-  fields in a JSON body.
-- `read` (the webhook) — no `id` returns everyone plus `home`/`away` name lists;
-  an `id` returns just that person (`presence`/`state` are `null` if never seen).
-  Every read includes `message`, the display-ready text.
-- `write` — requires `state`; `id` defaults to `娜` and `event` defaults to
-  `manual_write`. `state` accepts `home`/`in`/`true` and
+  `?home=<home>` for one house (`?home=all` for every house), `?format=json` for
+  the structured payload. Also accepts POST with the same fields in a JSON body.
+- `read` (the webhook) — no `id` returns everyone plus `home_id`/`away_id` name
+  lists; an `id` returns just that person (`presence`/`state` are `null` if never
+  seen). `home` names the house the result describes. Every read includes
+  `message`, the display-ready text.
+- `write` — requires `state`; `id` defaults to `娜`, `home` to `AMS`, and `event`
+  to `manual_write`. `state` accepts `home`/`in`/`true` and
   `away`/`left`/`out`/`not_home`/`false`.
 - The two `/webhook/presence/*` paths are the single `presence_webhook` job, so
   `POST /jobs/presence_webhook/disable` turns the pair off. `GET /presence` is a
@@ -185,6 +216,81 @@ curl -X POST http://localhost:5050/webhook/presence/write \
 - Nothing here arms or disarms the alarm panel — `presence/write` is bookkeeping
   only. The panel is changed by `/webhook/blink/*` and, when enabled in
   `configs/notify_config.json`, by `/webhook/notify/*`.
+
+### Multiple homes
+
+Every presence and leaving/arriving request takes an optional **`home`** field
+naming the house it belongs to. Leave it out and the request lands in the
+default home **`AMS`**, which is exactly how this server behaved before it knew
+about more than one house — so nothing needs changing for a single-home setup.
+
+```bash
+# Sam arrives at home M
+curl -X POST http://localhost:5050/webhook/notify/arriving \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Sam", "home": "M"}'
+```
+
+Homes are independent namespaces: the same `id` in two homes is two separate
+entries, and one can be `home` while the other is `away`. The `(A)`/`(D)` title
+postfix counts only the event's own home.
+
+Give a home its own notification text with a `homes` block inside the event in
+`configs/notify_config.json`. Every key in the block is optional, so a home can
+override just the title and inherit the shared message; a home with no block at
+all uses the shared text unchanged. `{home}` is replaced with the home's name:
+
+```json
+{
+    "leaving_home": {
+        "title": "がいしゅつ",
+        "message": "{id}さんが家を出ました。お気をつけて！",
+        "arm": false,
+        "homes": {
+            "M": { "title": "M — がいしゅつ", "message": "{id}さんが{home}を出ました。", "arm": true }
+        }
+    }
+}
+```
+
+Resolution precedence for the title, message, and arm/disarm flag is:
+**payload > the event's `homes` block for this home > the event's shared entry >
+built-in default.** `configs/notify_config.example.json` is a ready-made
+template showing the whole shape.
+
+Reading follows the same rule — no `home` means home `AMS`:
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?home=all"
+```
+
+```text
+Presence — 3 people across 2 homes
+---------------------------------------------------------------
+[AMS] Home (1): 娜   Away (1): Alex
+[M]   Home (1): Sam  Away (0): -
+
+[AMS] Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
+[AMS] 娜    home  since 2026-08-03 20:04:55.546  (arriving_home)
+[M]   Sam   home  since 2026-08-19 09:12:00.001  (arriving_home)
+```
+
+Notes and limits:
+
+- **All homes share one alarm panel and one phone.** `HA_ENTITY_ID` and
+  `HA_NOTIFY_TARGET` are not per-home, so a home-M arrival with `disarm: true`
+  disarms the same panel as home AMS. Only the text and the bookkeeping are
+  per-home.
+- **`all` is a reserved home name.** It is how a read asks for every house
+  (matched case-insensitively), so writing to it is rejected.
+- **Home names are case-sensitive and created on first write.** `{"home": "m"}`
+  makes a new home rather than matching `M` — the same is already true of
+  person ids.
+- **Unknown homes read as empty**, not as an error, so a dashboard polling a
+  house that has seen no traffic yet still gets a normal response.
+- `/webhook/location/*` is unaffected — a logged position is keyed by person
+  only, not by home.
 
 Then set the shared webhook secret:
 
@@ -226,11 +332,11 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](docs/Logging.md)) |
 | POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](docs/Uploads.md)) 🔒 |
-| POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home; `{"id": "<person>"}` 🔒 |
-| POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home; `{"id": "<person>"}` 🔒 |
-| POST   | `/webhook/presence/read`      | Read who's home / away, JSON body (see [Who left / arrived](#who-left--arrived)) 🔒 |
-| POST   | `/webhook/presence/write`     | Set a person's home/away state by hand 🔒 |
-| GET    | `/presence`                   | Read who's home / away as text; `?id=`, `?format=json` 🔒 |
+| POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home; `{"id": "<person>", "home": "<home>"}` 🔒 |
+| POST   | `/webhook/notify/arriving`    | Disarm the panel (optional) + notify you're arriving home; `{"id": "<person>", "home": "<home>"}` 🔒 |
+| POST   | `/webhook/presence/read`      | Read who's home / away, JSON body; `home` selects a house or `"all"` (see [Who left / arrived](#who-left--arrived)) 🔒 |
+| POST   | `/webhook/presence/write`     | Set a person's home/away state by hand, in a given `home` 🔒 |
+| GET    | `/presence`                   | Read who's home / away as text; `?id=`, `?home=`, `?home=all`, `?format=json` 🔒 |
 | POST   | `/webhook/location/log`       | Log a location for a person (see [Location log](#location-log)) 🔒 |
 | POST   | `/webhook/location/fetch`     | Read back a person's last location, JSON body 🔒 |
 | POST   | `/webhook/location/history`   | Read a person's whole history, formatted as text 🔒 |
@@ -270,6 +376,7 @@ curl -X POST http://localhost:5050/webhook/blink/disarm \
 
 # Notify your phone (title/message default to configs/notify_config.json; override per request)
 # "id" names who left/arrived and is recorded in state/presence.json (defaults to "娜")
+# "home" names the house (defaults to "A") — see Multiple homes
 curl -X POST http://localhost:5050/webhook/notify/leaving \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
@@ -279,6 +386,11 @@ curl -X POST http://localhost:5050/webhook/notify/arriving \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
   -d '{"id": "Alex", "title": "Welcome back", "message": "Kettle is on, {id}"}'
+
+curl -X POST http://localhost:5050/webhook/notify/arriving \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"id": "Sam", "home": "M"}'
 
 # Toggle a job or log type (secret required)
 curl -X POST http://localhost:5050/jobs/log/toggle \
@@ -709,8 +821,8 @@ python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
 python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
-python3 tests/test_notify_phone.py          # phone notification job tests
-python3 tests/test_presence_webhook.py      # presence read/write webhook tests
+python3 tests/test_notify_phone.py          # phone notification job tests (incl. per-home text)
+python3 tests/test_presence_webhook.py      # presence read/write webhook tests (incl. multi-home)
 python3 tests/test_location.py              # location log/fetch/history/purge + notify tests
 python3 app.py --debug                      # then hit endpoints with curl
 ```
