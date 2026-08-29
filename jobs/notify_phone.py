@@ -20,7 +20,7 @@ Each webhook does two things:
 The person is taken from the payload's "id" field; a post without an "id" is
 attributed to jobs.presence_state.DEFAULT_PERSON ("娜"). The house is taken from
 the payload's "home" field; a post without a "home" is attributed to
-jobs.presence_state.DEFAULT_HOME ("A"), so a single-home setup never has to
+jobs.presence_state.DEFAULT_HOME ("AMS"), so a single-home setup never has to
 mention one. Titles and messages may contain a "{id}" (or "{name}")
 placeholder, replaced with that person's name, and a "{home}" placeholder,
 replaced with the house.
@@ -288,7 +288,7 @@ def leaving_home(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Webhook handler: arm the panel (if enabled), notify, mark the person away.
 
     The person comes from the payload's "id" field, defaulting to "娜", and the
-    house from its "home" field, defaulting to "A".
+    house from its "home" field, defaulting to "AMS".
     """
     logger.debug("leaving_home payload: %s", payload)
     return _run_event("leaving_home", payload)
@@ -298,7 +298,7 @@ def arriving_home(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Webhook handler: disarm the panel (if enabled), notify, mark the person home.
 
     The person comes from the payload's "id" field, defaulting to "娜", and the
-    house from its "home" field, defaulting to "A".
+    house from its "home" field, defaulting to "AMS".
     """
     logger.debug("arriving_home payload: %s", payload)
     return _run_event("arriving_home", payload)
@@ -312,4 +312,4 @@ if __name__ == "__main__":
     print(f"with id:       {leaving_home({'id': 'Alex'})}")
     print(f"with home:     {leaving_home({'id': 'Sam', 'home': 'M'})}")
     print(f"payload override: {leaving_home({'title': 'Custom', 'message': 'Overridden'})}")
-    print(f"postfix (away):   {_title_postfix('leaving_home', 'nobody', 'A')}")
+    print(f"postfix (away):   {_title_postfix('leaving_home', 'nobody', DEFAULT_HOME)}")

@@ -180,7 +180,7 @@ def test_write_rejects_bad_payloads():
 
 
 def test_home_defaults_and_routes():
-    """A post with no "home" lands in home A; "home" routes it elsewhere."""
+    """A post with no "home" lands in the default home; "home" routes it elsewhere."""
     print("Testing the home payload key...")
     assert ps.resolve_home({"home": "M"}) == "M"
     assert ps.resolve_home({"home": "  M  "}) == "M"
@@ -189,18 +189,18 @@ def test_home_defaults_and_routes():
     assert ps.resolve_home({"home": {"nested": 1}}) == ps.DEFAULT_HOME
     assert ps.resolve_home({}) == ps.DEFAULT_HOME
     assert ps.resolve_home(None) == ps.DEFAULT_HOME
-    assert ps.DEFAULT_HOME == "A"
+    assert ps.DEFAULT_HOME == "AMS"
 
     with temp_presence_file():
-        # No "home" -> home A, and reading home A back finds it.
-        assert pw.write({"id": "Alex", "state": "home"})["home"] == "A"
+        # No "home" -> the default home, and reading it back finds it.
+        assert pw.write({"id": "Alex", "state": "home"})["home"] == ps.DEFAULT_HOME
         assert pw.read({})["home_id"] == ["Alex"]
-        assert pw.read({"home": "A"})["home_id"] == ["Alex"]
+        assert pw.read({"home": ps.DEFAULT_HOME})["home_id"] == ["Alex"]
 
         # A named home is a separate namespace.
         assert pw.write({"id": "Sam", "state": "home", "home": "M"})["home"] == "M"
         assert pw.read({"home": "M"})["home_id"] == ["Sam"]
-        assert pw.read({})["home_id"] == ["Alex"], "home M leaked into home A"
+        assert pw.read({})["home_id"] == ["Alex"], "home M leaked into the default home"
     print("  OK: home defaults to A, a named home routes separately")
 
 
@@ -208,17 +208,17 @@ def test_same_person_is_independent_per_home():
     """The same id in two homes is two entries that do not affect each other."""
     print("Testing per-home isolation of one person...")
     with temp_presence_file():
-        pw.write({"id": "Sam", "state": "home", "home": "A"})
+        pw.write({"id": "Sam", "state": "home", "home": ps.DEFAULT_HOME})
         pw.write({"id": "Sam", "state": "away", "home": "M"})
 
-        assert pw.read({"id": "Sam", "home": "A"})["state"] == ps.STATE_HOME
+        assert pw.read({"id": "Sam", "home": ps.DEFAULT_HOME})["state"] == ps.STATE_HOME
         assert pw.read({"id": "Sam", "home": "M"})["state"] == ps.STATE_AWAY
-        assert ps.anyone_home(home="A") is True
+        assert ps.anyone_home(home=ps.DEFAULT_HOME) is True
         assert ps.anyone_home(home="M") is False
 
         # Changing one home leaves the other alone.
-        pw.write({"id": "Sam", "state": "away", "home": "A"})
-        assert pw.read({"id": "Sam", "home": "A"})["state"] == ps.STATE_AWAY
+        pw.write({"id": "Sam", "state": "away", "home": ps.DEFAULT_HOME})
+        assert pw.read({"id": "Sam", "home": ps.DEFAULT_HOME})["state"] == ps.STATE_AWAY
         assert pw.read({"id": "Sam", "home": "M"})["state"] == ps.STATE_AWAY
     print("  OK: one id in two homes stays two independent entries")
 
@@ -227,17 +227,17 @@ def test_read_all_homes():
     """home="all" returns every home, with a total count and a tagged message."""
     print("Testing the all-homes read...")
     with temp_presence_file():
-        pw.write({"id": "Alex", "state": "away", "home": "A"})
-        pw.write({"state": "home", "home": "A"})       # no id -> 娜
+        pw.write({"id": "Alex", "state": "away", "home": ps.DEFAULT_HOME})
+        pw.write({"state": "home", "home": ps.DEFAULT_HOME})   # no id -> 娜
         pw.write({"id": "Sam", "state": "home", "home": "M"})
 
         res = pw.read({"home": "all"})
         assert res["status"] == "ok" and res["home"] == "all", res
         assert res["count"] == 3, res
-        assert set(res["homes"]) == {"A", "M"}, res
-        assert res["homes"]["A"]["count"] == 2, res
-        assert res["homes"]["A"]["home_id"] == [ps.DEFAULT_PERSON], res
-        assert res["homes"]["A"]["away_id"] == ["Alex"], res
+        assert set(res["homes"]) == {ps.DEFAULT_HOME, "M"}, res
+        assert res["homes"][ps.DEFAULT_HOME]["count"] == 2, res
+        assert res["homes"][ps.DEFAULT_HOME]["home_id"] == [ps.DEFAULT_PERSON], res
+        assert res["homes"][ps.DEFAULT_HOME]["away_id"] == ["Alex"], res
         assert res["homes"]["M"]["home_id"] == ["Sam"], res
 
         message = res["message"]
@@ -245,9 +245,9 @@ def test_read_all_homes():
         lines = message.splitlines()
         assert lines[0] == "Presence — 3 people across 2 homes", lines
         assert set("-") == set(lines[1]), lines
-        assert lines[2].startswith("[A] Home (1)"), lines
-        assert lines[3].startswith("[M] Home (1)"), lines
-        assert any(l.startswith("[M] Sam") for l in lines), lines
+        assert lines[2].startswith(f"[{ps.DEFAULT_HOME}] Home (1)"), lines
+        assert lines[3].startswith("[M]"), lines
+        assert any(l.startswith("[M]") and "Sam" in l for l in lines), lines
         # The rule spans the widest line, counting 娜 as two columns.
         assert len(lines[1]) == max(pw.display_width(l) for l in lines), lines
 
@@ -274,7 +274,7 @@ def test_read_unknown_and_empty_homes():
         assert pw.read({"home": "all"})["count"] == 0
         assert pw.read({"home": "all"})["message"] == "Presence — nobody recorded yet."
         assert pw.format_all_homes({}) == "Presence — nobody recorded yet."
-        assert pw.format_all_homes({"A": {}}) == "Presence — nobody recorded yet."
+        assert pw.format_all_homes({ps.DEFAULT_HOME: {}}) == "Presence — nobody recorded yet."
     print("  OK: unknown and empty homes read as empty, not an error")
 
 
@@ -291,7 +291,7 @@ def test_write_rejects_the_reserved_home_name():
 
 
 def test_legacy_file_migrates_into_home_a():
-    """A pre-multi-home presence.json is read as home A and rewritten nested."""
+    """A pre-multi-home presence.json is read as the default home and rewritten nested."""
     print("Testing migration of a single-home presence file...")
     import json
 
@@ -304,9 +304,9 @@ def test_legacy_file_migrates_into_home_a():
             "last_modified": "2026-08-18 22:04:21.680",
         }, ensure_ascii=False), encoding="utf-8")
 
-        # Read as home A, with both entries intact.
+        # Read as the default home, with both entries intact.
         res = pw.read({})
-        assert res["home"] == "A" and res["count"] == 2, res
+        assert res["home"] == ps.DEFAULT_HOME and res["count"] == 2, res
         assert res["home_id"] == ["Alex"] and res["away_id"] == [ps.DEFAULT_PERSON], res
         assert ps.get_state("Alex")["event"] == "arriving_home", res
 
@@ -314,10 +314,10 @@ def test_legacy_file_migrates_into_home_a():
         pw.write({"id": "Sam", "state": "home", "home": "M"})
         on_disk = json.loads(state_file.read_text(encoding="utf-8"))
         assert "people" not in on_disk, on_disk
-        assert set(on_disk["homes"]) == {"A", "M"}, on_disk
-        assert set(on_disk["homes"]["A"]["people"]) == {"娜", "Alex"}, on_disk
+        assert set(on_disk["homes"]) == {ps.DEFAULT_HOME, "M"}, on_disk
+        assert set(on_disk["homes"][ps.DEFAULT_HOME]["people"]) == {"娜", "Alex"}, on_disk
         assert on_disk["homes"]["M"]["people"]["Sam"]["state"] == ps.STATE_HOME, on_disk
-    print("  OK: legacy file migrated into home A, entries preserved")
+    print("  OK: legacy file migrated into the default home, entries preserved")
 
 
 def test_store_survives_odd_home_shapes():
@@ -326,15 +326,21 @@ def test_store_survives_odd_home_shapes():
     import json
 
     with temp_presence_file() as state_file:
-        for bad in ('{"homes": "nope"}', '{"homes": {"A": "nope"}}',
-                    '{"homes": {"A": {"people": "nope"}}}', '[]'):
+        # The malformed home is the one a default read looks at, so these
+        # genuinely exercise the guard rather than missing it.
+        home = ps.DEFAULT_HOME
+        for bad in ('{"homes": "nope"}',
+                    '{"homes": {"%s": "nope"}}' % home,
+                    '{"homes": {"%s": {"people": "nope"}}}' % home,
+                    '{"homes": {"%s": {}}}' % home,
+                    '[]'):
             state_file.write_text(bad, encoding="utf-8")
             assert pw.read({})["count"] == 0, bad
             assert pw.read({"home": "all"})["count"] == 0, bad
 
         # A write on top of a broken file still works.
-        ps.set_state("Alex", ps.STATE_HOME, home="A")
-        assert ps.get_state("Alex", home="A")["state"] == ps.STATE_HOME
+        ps.set_state("Alex", ps.STATE_HOME, home=ps.DEFAULT_HOME)
+        assert ps.get_state("Alex", home=ps.DEFAULT_HOME)["state"] == ps.STATE_HOME
     print("  OK: odd home shapes read as empty and are recoverable")
 
 
@@ -369,10 +375,10 @@ def test_get_presence_accepts_home():
         return
 
     with temp_presence_file():
-        pw.write({"id": "Alex", "state": "away", "home": "A"})
+        pw.write({"id": "Alex", "state": "away", "home": ps.DEFAULT_HOME})
         pw.write({"id": "Sam", "state": "home", "home": "M"})
 
-        # No ?home= -> home A, exactly as before.
+        # No ?home= -> the default home, exactly as before.
         body = client.get("/presence", headers=headers).get_data(as_text=True)
         assert "Alex" in body and "Sam" not in body, body
 
@@ -382,7 +388,7 @@ def test_get_presence_accepts_home():
 
         # ?home=all shows both, tagged.
         body = client.get("/presence?home=all", headers=headers).get_data(as_text=True)
-        assert "[A] Alex" in body and "[M] Sam" in body, body
+        assert f"[{ps.DEFAULT_HOME}] Alex" in body and "Sam" in body, body
 
         # ?format=json composes with ?home=.
         data = client.get("/presence?home=M&format=json", headers=headers).get_json()
@@ -393,7 +399,7 @@ def test_get_presence_accepts_home():
         assert data["id"] == "Sam" and data["state"] == ps.STATE_HOME, data
 
         # The same id in the other house is a different entry.
-        data = client.get("/presence?home=A&id=Sam&format=json", headers=headers).get_json()
+        data = client.get(f"/presence?home={ps.DEFAULT_HOME}&id=Sam&format=json", headers=headers).get_json()
         assert data["presence"] is None, data
     print("  OK: ?home= selects a house and composes with ?id= and ?format=json")
 

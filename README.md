@@ -16,7 +16,7 @@ server code.
   over HTTP (`/webhook/presence/read`)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
   webhooks keeps a separate household, with its own notification text, in each
-  house; omit it and everything lands in the default home `A` — see
+  house; omit it and everything lands in the default home `AMS` — see
   [Multiple homes](#multiple-homes)
 - Per-person location log — each id gets its own `state/<id>_loc.json`, written by
   `/webhook/location/log`, readable as JSON (ready for an iPhone Shortcut to open in
@@ -121,7 +121,7 @@ curl -X POST http://localhost:5050/webhook/notify/leaving \
 ```
 
 A post with no `id` (or a blank one) is attributed to **`娜`**, and one with no
-`home` to **`A`** — see [Multiple homes](#multiple-homes).
+`home` to **`AMS`** — see [Multiple homes](#multiple-homes).
 
 Each event is persisted per home and per person in **`state/presence.json`**, so
 the current home/away state survives restarts. The file is created
@@ -130,7 +130,7 @@ automatically and is gitignored (it is runtime state):
 ```json
 {
     "homes": {
-        "A": {
+        "AMS": {
             "people": {
                 "娜":   { "state": "home", "event": "arriving_home", "last_updated": "2026-08-03 18:42:11.482" },
                 "Alex": { "state": "away", "event": "leaving_home",  "last_updated": "2026-08-03 08:07:53.119" }
@@ -149,10 +149,10 @@ automatically and is gitignored (it is runtime state):
 Leaving sets `"away"`, arriving sets `"home"`. Other jobs can read or write it
 through `jobs/presence_state.py` (`resolve_person`, `resolve_home`, `get_state`,
 `all_states`, `all_homes`, `anyone_home`, `set_state`). Every accessor takes an
-optional `home=` argument that defaults to `A`.
+optional `home=` argument that defaults to `AMS`.
 
 > A presence file written before multi-home support — a top-level `people` map
-> with no `homes` — is read as home `A` and rewritten in the nested shape by the
+> with no `homes` — is read as home `AMS` and rewritten in the nested shape by the
 > next write. Nothing has to be converted by hand.
 
 The store is also reachable over HTTP. Reading is a plain **GET** that returns
@@ -206,7 +206,7 @@ curl -X POST http://localhost:5050/webhook/presence/write \
   lists; an `id` returns just that person (`presence`/`state` are `null` if never
   seen). `home` names the house the result describes. Every read includes
   `message`, the display-ready text.
-- `write` — requires `state`; `id` defaults to `娜`, `home` to `A`, and `event`
+- `write` — requires `state`; `id` defaults to `娜`, `home` to `AMS`, and `event`
   to `manual_write`. `state` accepts `home`/`in`/`true` and
   `away`/`left`/`out`/`not_home`/`false`.
 - The two `/webhook/presence/*` paths are the single `presence_webhook` job, so
@@ -221,7 +221,7 @@ curl -X POST http://localhost:5050/webhook/presence/write \
 
 Every presence and leaving/arriving request takes an optional **`home`** field
 naming the house it belongs to. Leave it out and the request lands in the
-default home **`A`**, which is exactly how this server behaved before it knew
+default home **`AMS`**, which is exactly how this server behaved before it knew
 about more than one house — so nothing needs changing for a single-home setup.
 
 ```bash
@@ -259,7 +259,7 @@ Resolution precedence for the title, message, and arm/disarm flag is:
 built-in default.** `configs/notify_config.example.json` is a ready-made
 template showing the whole shape.
 
-Reading follows the same rule — no `home` means home `A`:
+Reading follows the same rule — no `home` means home `AMS`:
 
 ```bash
 curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/presence?home=all"
@@ -267,20 +267,20 @@ curl -H "X-Webhook-Secret: your-shared-secret-here" "http://localhost:5050/prese
 
 ```text
 Presence — 3 people across 2 homes
--------------------------------------------------------------
-[A] Home (1): 娜   Away (1): Alex
-[M] Home (1): Sam  Away (0): -
+---------------------------------------------------------------
+[AMS] Home (1): 娜   Away (1): Alex
+[M]   Home (1): Sam  Away (0): -
 
-[A] Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
-[A] 娜    home  since 2026-08-03 20:04:55.546  (arriving_home)
-[M] Sam   home  since 2026-08-19 09:12:00.001  (arriving_home)
+[AMS] Alex  away  since 2026-08-03 20:04:55.545  (leaving_home)
+[AMS] 娜    home  since 2026-08-03 20:04:55.546  (arriving_home)
+[M]   Sam   home  since 2026-08-19 09:12:00.001  (arriving_home)
 ```
 
 Notes and limits:
 
 - **All homes share one alarm panel and one phone.** `HA_ENTITY_ID` and
   `HA_NOTIFY_TARGET` are not per-home, so a home-M arrival with `disarm: true`
-  disarms the same panel as home A. Only the text and the bookkeeping are
+  disarms the same panel as home AMS. Only the text and the bookkeeping are
   per-home.
 - **`all` is a reserved home name.** It is how a read asks for every house
   (matched case-insensitively), so writing to it is rejected.

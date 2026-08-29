@@ -8,7 +8,7 @@ Two webhooks share this module (see config.json):
 
 ``read`` reports who is home and who is away, from state/presence.json::
 
-    {}                            # everyone in the default home ("A")
+    {}                            # everyone in the default home ("AMS")
     {"id": "娜"}                  # just one person, in the default home
     {"home": "M"}                 # everyone in home M
     {"home": "M", "id": "Sam"}    # one person in home M
@@ -32,9 +32,9 @@ up when a leaving/arriving webhook was missed::
 ``state`` accepts a few friendly spellings: home/in/true for home, and
 away/left/out/not_home/false for away.
 
-A post with no ``home`` is attributed to ``DEFAULT_HOME`` ("A"), so a single-home
-setup never has to mention one. Homes are independent: the same ``id`` in two
-homes is two separate entries.
+A post with no ``home`` is attributed to ``DEFAULT_HOME`` ("AMS"), so a
+single-home setup never has to mention one. Homes are independent: the same
+``id`` in two homes is two separate entries.
 
 This job only ever touches the presence file — it deliberately does NOT arm or
 disarm the alarm panel. Recording a state here is bookkeeping, not an
@@ -53,6 +53,7 @@ try:
     from jobs.log_engine import log as write_log
     from jobs.presence_state import (
         ALL_HOMES,
+        DEFAULT_HOME,
         STATE_AWAY,
         STATE_HOME,
         all_homes,
@@ -67,6 +68,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
     from log_engine import log as write_log
     from presence_state import (
         ALL_HOMES,
+        DEFAULT_HOME,
         STATE_AWAY,
         STATE_HOME,
         all_homes,
@@ -169,13 +171,13 @@ def format_all_homes(homes: Dict[str, Dict[str, Any]]) -> str:
     the houses stay distinguishable::
 
         Presence — 3 people across 2 homes
-        ---------------------------------------------------
-        [A] Home (0): -    Away (2): Alex, 娜
-        [M] Home (1): Sam  Away (0): -
+        -----------------------------------------------------
+        [AMS] Home (0): -    Away (2): Alex, 娜
+        [M]   Home (1): Sam  Away (0): -
 
-        [A] Alex  away  since 2026-08-03 08:07:53.119  (leaving_home)
-        [A] 娜    away  since 2026-08-18 22:04:21.680  (leaving_home)
-        [M] Sam   home  since 2026-08-19 09:12:00.001  (arriving_home)
+        [AMS] Alex  away  since 2026-08-03 08:07:53.119  (leaving_home)
+        [AMS] 娜    away  since 2026-08-18 22:04:21.680  (leaving_home)
+        [M]   Sam   home  since 2026-08-19 09:12:00.001  (arriving_home)
 
     Homes with nobody in them are left out, so a home that was created and then
     emptied does not clutter the summary.
@@ -360,7 +362,7 @@ if __name__ == "__main__":
     print("bad state     ->", write({"state": "somewhere"}))
     print("missing state ->", write({}))
     print("reserved home ->", write({"state": "home", "home": "all"}))
-    print("\nformatted message (home A):\n")
+    print(f"\nformatted message (home {DEFAULT_HOME}):\n")
     print(read({})["message"])
     print("\nformatted message (every home):\n")
     print(read({"home": "all"})["message"])

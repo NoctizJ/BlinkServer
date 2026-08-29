@@ -292,8 +292,8 @@ def test_postfix_is_computed_per_home():
         np.arriving_home({"id": "Sam", "home": "M", "title": "Arriving"})
         assert sent.call_args[0][0] == "Arriving (D)", sent.call_args[0]
 
-        # Alex leaving home A empties A, even though M is occupied.
-        np.leaving_home({"id": "Alex", "home": "A", "title": "Leaving"})
+        # Alex leaving the default home empties it, even though M is occupied.
+        np.leaving_home({"id": "Alex", "home": ps.DEFAULT_HOME, "title": "Leaving"})
         assert sent.call_args[0][0] == "Leaving (A)", sent.call_args[0]
 
         # And leaving M empties M, even though it is a different house.
@@ -301,10 +301,10 @@ def test_postfix_is_computed_per_home():
         assert sent.call_args[0][0] == "Leaving (A)", sent.call_args[0]
 
         # Directly, too: the store has Alex home in A only.
-        ps.set_state("Alex", ps.STATE_HOME, event="arriving_home", home="A")
-        assert np._title_postfix("leaving_home", "Sam", "A") == np.POSTFIX_DISARM
+        ps.set_state("Alex", ps.STATE_HOME, event="arriving_home", home=ps.DEFAULT_HOME)
+        assert np._title_postfix("leaving_home", "Sam", ps.DEFAULT_HOME) == np.POSTFIX_DISARM
         assert np._title_postfix("leaving_home", "Sam", "M") == np.POSTFIX_ARM
-        # The home argument defaults to A, matching the pre-multi-home behaviour.
+        # The home argument defaults to DEFAULT_HOME, as before multi-home.
         assert np._title_postfix("leaving_home", "Sam") == np.POSTFIX_DISARM
     print("  OK: postfix counts only the event's own home")
 
@@ -353,13 +353,13 @@ def test_notify_persists_presence_in_the_named_home():
         assert res["home"] == "M", res
         assert res["presence"]["state"] == ps.STATE_HOME, res
 
-        res = np.leaving_home({"id": "Sam"})   # no home -> A
-        assert res["home"] == "A", res
+        res = np.leaving_home({"id": "Sam"})   # no home -> the default
+        assert res["home"] == ps.DEFAULT_HOME, res
 
         assert ps.get_state("Sam", home="M")["state"] == ps.STATE_HOME
-        assert ps.get_state("Sam", home="A")["state"] == ps.STATE_AWAY
-        assert set(ps.all_homes()) == {"A", "M"}, ps.all_homes()
-    print("  OK: presence written into the named home, default stays A")
+        assert ps.get_state("Sam", home=ps.DEFAULT_HOME)["state"] == ps.STATE_AWAY
+        assert set(ps.all_homes()) == {ps.DEFAULT_HOME, "M"}, ps.all_homes()
+    print("  OK: presence written into the named home, default stays DEFAULT_HOME")
 
 
 def test_odd_homes_block_falls_back():

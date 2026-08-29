@@ -7,7 +7,7 @@ restarts:
 
     {
       "homes": {
-        "A": {
+        "AMS": {
           "people": {
             "娜": {
               "state": "home",
@@ -30,8 +30,8 @@ Two things identify an entry, both taken from the webhook payload:
   * ``id``   — who this is; a post without one is attributed to ``DEFAULT_PERSON``
   * ``home`` — which house; a post without one is attributed to ``DEFAULT_HOME``
 
-Homes are independent namespaces: "Sam" in home ``A`` and "Sam" in home ``M`` are
-two separate entries, and one can be home while the other is away.
+Homes are independent namespaces: "Sam" in home ``AMS`` and "Sam" in home ``M``
+are two separate entries, and one can be home while the other is away.
 
 Older single-home files — a top-level ``people`` map with no ``homes`` — are
 migrated into ``DEFAULT_HOME`` when they are read, and the new shape is written
@@ -41,7 +41,7 @@ Usage:
     from jobs.presence_state import resolve_home, resolve_person, set_state
 
     person = resolve_person(payload)      # payload["id"]   or "娜"
-    home = resolve_home(payload)          # payload["home"] or "A"
+    home = resolve_home(payload)          # payload["home"] or "AMS"
     set_state(person, STATE_AWAY, event="leaving_home", home=home)
     get_state(person, home=home)          # -> {"state": "away", ...}
 """
@@ -70,7 +70,7 @@ DEFAULT_PERSON = "娜"
 
 # Attribution for posts that omit the home, so a single-home setup never has to
 # mention one.
-DEFAULT_HOME = "A"
+DEFAULT_HOME = "AMS"
 
 # Reserved home name asking a reader for every home at once.
 ALL_HOMES = "all"
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     print("set_state (default home) ->", set_state(resolve_person({}), STATE_AWAY, event="leaving_home"))
     print("set_state (home M)       ->", set_state("Sam", STATE_HOME, event="arriving_home", home="M"))
     print("get_state (default home) ->", get_state(DEFAULT_PERSON))
-    print("anyone_home('A')         ->", anyone_home())
+    print("anyone_home('AMS')       ->", anyone_home())
     print("anyone_home('M')         ->", anyone_home(home="M"))
     print("all_homes                ->", all_homes())
     print("Wrote to:", STATE_FILE)
