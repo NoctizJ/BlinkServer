@@ -8,10 +8,11 @@ Two webhooks share this module (see config.json):
 
 Each webhook does two things:
 
-  1. Optionally arms (leaving) or disarms (arriving) the Home Assistant alarm
-     panel, via the shared jobs.home_assistant_arm_disarm.set_alarm() core.
+  1. Optionally arms (leaving) or disarms (arriving) that home's Home Assistant
+     alarm panel, via the shared jobs.home_assistant_blink.set_alarm() core.
      Whether it does so is controlled by a flag in notify_config.json
-     ("arm" for leaving_home, "disarm" for arriving_home).
+     ("arm" for leaving_home, "disarm" for arriving_home). The panel is chosen by
+     the event's home, from blink.panel_<home> in home_assistant_entities.json.
   2. Pushes a notification to the phone through the shared
      jobs.home_assistant_notify.notify_phone() wrapper.
   3. Records who left/arrived in the presence store
@@ -54,9 +55,8 @@ shared configuration. An incoming webhook payload may also override "title",
 payload > the event's "homes" block for this home > notify_config.json >
 built-in default.
 
-All homes share one Home Assistant configuration, so they arm and disarm the
-same panel and notify the same phone — only the text and the bookkeeping are
-per-home.
+Each home arms and disarms its own panel (``blink.panel_<home>``), but every home
+notifies the same phone — one Home Assistant connection, one notify target.
 """
 
 import logging
@@ -65,7 +65,7 @@ from typing import Dict, Any
 try:
     # Shared Home Assistant wrappers + logging engine.
     from jobs.home_assistant_notify import fill_placeholders, load_event_text, notify_phone
-    from jobs.home_assistant_arm_disarm import set_alarm
+    from jobs.home_assistant_blink import set_alarm
     from jobs.log_engine import log as write_log
     from jobs.presence_state import (
         DEFAULT_HOME,
@@ -78,7 +78,7 @@ try:
     )
 except ImportError:  # pragma: no cover - allows running this file directly
     from home_assistant_notify import fill_placeholders, load_event_text, notify_phone
-    from home_assistant_arm_disarm import set_alarm
+    from home_assistant_blink import set_alarm
     from log_engine import log as write_log
     from presence_state import (
         DEFAULT_HOME,
@@ -232,15 +232,16 @@ def _run_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "title": cfg["title"],
     }
 
-    # 1. Arm (leaving) or disarm (arriving) the alarm panel, gated by config.
-    #    Every home shares one panel, so this is not scoped by home.
+    # 1. Arm (leaving) or disarm (arriving) this home's alarm panel, gated by
+    #    config. The panel comes from blink.panel_<home>, so home M arms home M.
     if action and cfg.get(action):
         try:
-            result["alarm"] = set_alarm(action)
+            result["alarm"] = set_alarm(action, home=home)
         except Exception as e:
             error_msg = str(e)
-            logger.error("%s failed for %s: %s", action, event, error_msg)
-            write_log("blink", f"NOTIFY {event} {action.upper()} ERROR: {error_msg}")
+            logger.error("%s failed for %s (home %s): %s", action, event, home, error_msg)
+            write_log("blink",
+                      f"NOTIFY {event} {action.upper()} ERROR (home {home}): {error_msg}")
             result["alarm"] = {"status": "error", "error": f"{action} failed", "message": error_msg}
     else:
         result["alarm"] = {

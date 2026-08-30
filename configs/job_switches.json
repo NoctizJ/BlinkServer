@@ -1,12 +1,13 @@
 {
   "jobs": {
-    "home_assistant_arm_disarm": true,
+    "home_assistant_blink": true,
     "sample_job": true,
     "file_upload": true,
     "notify_phone": true,
     "presence_webhook": true,
     "location_webhook": true,
+    "home_assistant_lutron": true,
     "log": true
   },
-  "last_modified": "2026-07-11 10:02:45.994004"
+  "last_modified": "2026-08-30 14:44:48.583430"
 }

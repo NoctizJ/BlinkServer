@@ -33,6 +33,18 @@ from jobs.location_notify import (
     enabled_for as location_notify_enabled,
     set_enabled_for as set_location_notify_for,
 )
+from jobs.home_assistant_blink import (
+    NOTIFY_EVENTS as BLINK_NOTIFY_ACTIONS,
+    all_notify_enabled as all_blink_notify,
+    notify_enabled_for as blink_notify_enabled,
+    set_notify_enabled_for as set_blink_notify_for,
+)
+from jobs.home_assistant_switches import (
+    FEATURES as HA_FEATURES,
+    all_enabled as all_ha_features,
+    enabled_for as ha_feature_enabled,
+    set_enabled_for as set_ha_feature,
+)
 
 # Set up argument parsing for debug mode
 parser = argparse.ArgumentParser(description='Start Blink Server')
@@ -51,7 +63,7 @@ else:
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "configs" / "config.json"
-JOB_CONFIG_PATH = Path(__file__).parent / "configs" / "job_config.json"
+JOB_SWITCHES_PATH = Path(__file__).parent / "configs" / "job_switches.json"
 WEBHOOK_SECRET_PATH = Path(__file__).parent / "configs" / "webhook_secret.json"
 
 app = Flask(__name__)
@@ -111,7 +123,7 @@ def require_webhook_secret(view):
 def load_job_config():
     """Load job configuration including enabled/disabled status."""
     try:
-        with open(JOB_CONFIG_PATH) as f:
+        with open(JOB_SWITCHES_PATH) as f:
             return json.load(f)
     except FileNotFoundError:
         # Create default job config if it doesn't exist
@@ -125,7 +137,7 @@ def load_job_config():
 
 def save_job_config(config):
     """Save job configuration to file."""
-    with open(JOB_CONFIG_PATH, 'w') as f:
+    with open(JOB_SWITCHES_PATH, 'w') as f:
         json.dump(config, f, indent=2)
 
 
@@ -307,9 +319,9 @@ def toggle_job(job_name):
 
 # Log management endpoints
 #
-# The master log switch is the "log" job in job_config.json — toggle it with
+# The master log switch is the "log" job in job_switches.json — toggle it with
 # the generic job endpoints above (e.g. POST /jobs/log/disable). The endpoints
-# below manage the per-type switches in log_config.json.
+# below manage the per-type switches in log_switches.json.
 @app.route("/logs")
 def list_log_types():
     """List all configured log types and their on/off status."""
@@ -435,9 +447,9 @@ def location_history():
 
 
 # Per-person switches for the phone notification that POST /webhook/location/log
-# sends. These mirror the /logs/{type}/* switches: one entry per id in
-# configs/location_notify_config.json, under the master `notify_phone` job
-# switch. A person nobody has toggled yet is on.
+# sends. These mirror the /logs/{type}/* switches: one entry per id in the
+# "location_log" section of configs/notify_switches.json, under the master
+# `notify_phone` job switch. A person nobody has toggled yet is on.
 @app.route("/location/notify", methods=["GET"])
 @require_webhook_secret
 def list_location_notify():
@@ -478,6 +490,111 @@ def disable_location_notify(person):
 def toggle_location_notify(person):
     """Flip the location notification for one person."""
     return set_location_notify(person, not location_notify_enabled(person))
+
+
+# Per-action switches for the phone notification that POST /webhook/blink/arm and
+# /webhook/blink/disarm send. These mirror the /location/notify/* switches: one
+# entry per action in the "blink_control" section of configs/notify_switches.json,
+# under the same master `notify_phone` job switch. An action nobody has toggled
+# yet is on. Turning one off silences the notification only — the panel is still
+# armed or disarmed.
+@app.route("/blink/notify", methods=["GET"])
+@require_webhook_secret
+def list_blink_notify():
+    """List each blink action's notification switch, and the master switch."""
+    actions = [{"action": action, "enabled": enabled}
+               for action, enabled in sorted(all_blink_notify().items())]
+    return jsonify({
+        "master": {"job": NOTIFY_MASTER_SWITCH,
+                   "enabled": get_job_enabled_status(NOTIFY_MASTER_SWITCH)},
+        "actions": actions,
+    })
+
+
+def set_blink_notify(action, enabled):
+    """Persist one blink action's notification switch and describe it."""
+    if action not in BLINK_NOTIFY_ACTIONS:
+        return jsonify({
+            "error": f"unknown action '{action}'",
+            "message": f"must be one of: {', '.join(sorted(BLINK_NOTIFY_ACTIONS))}",
+        }), 404
+    set_blink_notify_for(action, enabled)
+    state = "enabled" if enabled else "disabled"
+    return jsonify({"status": "ok", "action": action, "enabled": enabled,
+                    "message": f"Blink {action} notifications {state}"})
+
+
+@app.route("/blink/notify/<action>/enable", methods=["POST"])
+@require_webhook_secret
+def enable_blink_notify(action):
+    """Turn on the notification for one blink action."""
+    return set_blink_notify(action, True)
+
+
+@app.route("/blink/notify/<action>/disable", methods=["POST"])
+@require_webhook_secret
+def disable_blink_notify(action):
+    """Turn off the notification for one blink action."""
+    return set_blink_notify(action, False)
+
+
+@app.route("/blink/notify/<action>/toggle", methods=["POST"])
+@require_webhook_secret
+def toggle_blink_notify(action):
+    """Flip the notification for one blink action."""
+    if action not in BLINK_NOTIFY_ACTIONS:
+        return set_blink_notify(action, True)  # reports the 404 for us
+    return set_blink_notify(action, not blink_notify_enabled(action))
+
+
+# Top-tier switches for this server's Home Assistant integration, in
+# configs/home_assistant_switches.json. These sit above the job and notification
+# switches: `blink` off stops every panel call (from /webhook/blink/* and
+# the leaving/arriving webhooks alike), and `notify` off stops every phone
+# notification, without either needing home_assistant_config.json to be present.
+@app.route("/ha", methods=["GET"])
+@require_webhook_secret
+def list_ha_features():
+    """List each Home Assistant feature switch."""
+    features = [{"feature": feature, "enabled": enabled}
+                for feature, enabled in sorted(all_ha_features().items())]
+    return jsonify({"features": features})
+
+
+def set_ha_feature_status(feature, enabled):
+    """Persist one Home Assistant feature switch and describe it."""
+    if feature not in HA_FEATURES:
+        return jsonify({
+            "error": f"unknown feature '{feature}'",
+            "message": f"must be one of: {', '.join(sorted(HA_FEATURES))}",
+        }), 404
+    set_ha_feature(feature, enabled)
+    state = "enabled" if enabled else "disabled"
+    return jsonify({"status": "ok", "feature": feature, "enabled": enabled,
+                    "message": f"Home Assistant {feature} {state}"})
+
+
+@app.route("/ha/<feature>/enable", methods=["POST"])
+@require_webhook_secret
+def enable_ha_feature(feature):
+    """Turn on one Home Assistant feature."""
+    return set_ha_feature_status(feature, True)
+
+
+@app.route("/ha/<feature>/disable", methods=["POST"])
+@require_webhook_secret
+def disable_ha_feature(feature):
+    """Turn off one Home Assistant feature."""
+    return set_ha_feature_status(feature, False)
+
+
+@app.route("/ha/<feature>/toggle", methods=["POST"])
+@require_webhook_secret
+def toggle_ha_feature(feature):
+    """Flip one Home Assistant feature."""
+    if feature not in HA_FEATURES:
+        return set_ha_feature_status(feature, True)  # reports the 404 for us
+    return set_ha_feature_status(feature, not ha_feature_enabled(feature))
 
 
 config = load_config()

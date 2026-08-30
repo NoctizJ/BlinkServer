@@ -43,7 +43,7 @@ class temp_location_dir:
         self._patches = [
             mock.patch.object(ls, "STATE_DIR", state),
             mock.patch.object(ln, "SWITCH_FILE",
-                              root / "configs" / "location_notify_config.json"),
+                              root / "configs" / "notify_switches.json"),
             mock.patch.object(ln, "notify_phone",
                               return_value={"status": "success", "message": "sent"}),
         ]
@@ -891,9 +891,9 @@ def test_webhooks_are_registered():
         assert callable(getattr(lw, action, None)), action
 
     # One module means one job switch, like presence_webhook.
-    job_config = json.loads(
-        (Path(__file__).parent.parent / "configs" / "job_config.json").read_text())
-    assert "location_webhook" in job_config["jobs"], job_config
+    job_switches = json.loads(
+        (Path(__file__).parent.parent / "configs" / "job_switches.json").read_text())
+    assert "location_webhook" in job_switches["jobs"], job_switches
     print("  OK: /webhook/location/{log,fetch,history,purge} -> one job, secret required")
 
 

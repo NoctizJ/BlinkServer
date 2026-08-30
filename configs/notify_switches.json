@@ -1,0 +1,8 @@
+{
+  "location_log": {},
+  "blink_control": {
+    "arm": true,
+    "disarm": true
+  },
+  "last_modified": null
+}

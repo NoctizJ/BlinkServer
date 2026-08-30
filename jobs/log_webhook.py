@@ -9,8 +9,8 @@ Expects a JSON payload of the form::
     }
 
 If ``type`` is null/omitted the logging engine uses its default type. The
-actual write is still gated by the master ``"log"`` switch (job_config.json)
-and the per-type switch (log_config.json), so a log may be suppressed even
+actual write is still gated by the master ``"log"`` switch (job_switches.json)
+and the per-type switch (log_switches.json), so a log may be suppressed even
 when this webhook is enabled.
 """
 

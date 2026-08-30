@@ -1,0 +1,21 @@
+{
+  "blink": {
+    "panel_AMS": "alarm_control_panel.blink_armstrong",
+    "panel_M": "alarm_control_panel.blink_cabin"
+  },
+  "notify": {
+    "target": "mobile_app_aisingioro"
+  },
+  "lutron": {
+    "lights": {
+      "kitchen": "light.kitchen_main",
+      "living": "light.living_room_dimmer",
+      "hallway": "switch.hallway_lights"
+    },
+    "scenes": {
+      "movie": "scene.movie_night",
+      "goodnight": "scene.goodnight",
+      "morning": "scene.good_morning"
+    }
+  }
+}

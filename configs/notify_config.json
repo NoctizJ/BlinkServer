@@ -13,5 +13,13 @@
     "title": "位置情報を記録",
     "message": "{id} is at {address} ({time}).",
     "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
+  },
+  "blink_arm": {
+    "title": "Blink Control (A)",
+    "message": ""
+  },
+  "blink_disarm": {
+    "title": "Blink Control (D)",
+    "message": ""
   }
 }

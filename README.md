@@ -14,6 +14,12 @@ server code.
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 - Per-person home/away presence, persisted in `state/presence.json` and readable
   over HTTP (`/webhook/presence/read`)
+- Lutron light and scene control through Home Assistant — on/off/toggle, brightness
+  percentage, and scene activation, with friendly aliases — see [Lutron](#lutron)
+- **SOS** blinker for any Lutron light or switch — on/off in real seconds, run in
+  the background, always ending off — see [SOS](#sos)
+- Home Assistant integration switchable by feature — turn the alarm panel, the phone
+  notifications, or Lutron off entirely without touching config — see [Switches](#switches)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
   webhooks keeps a separate household, with its own notification text, in each
   house; omit it and everything lands in the default home `AMS` — see
@@ -44,15 +50,38 @@ Fill in your values:
 ```json
 {
     "HA_BASE_URL": "http://localhost:8123",
-    "HA_API_KEY": "your_home_assistant_long_lived_access_token",
-    "HA_ENTITY_ID": "alarm_control_panel.blink_NAME"
+    "HA_API_KEY": "your_home_assistant_long_lived_access_token"
 }
 ```
 
 > `configs/home_assistant_config.json` holds a secret token and is gitignored — never commit it.
 
-`HA_NOTIFY_TARGET` (e.g. `mobile_app_aisingioro`) is only needed for the phone
-notification webhooks (`/webhook/notify/*`); it names the Home Assistant
+Which *entities* to act on live separately, in the tracked
+**`configs/home_assistant_entities.json`** — an entity id is a name, not a
+credential, so keeping it out of the gitignored file means it survives a fresh
+clone and shows up in diffs:
+
+```json
+{
+    "blink":  { "panel_AMS": "alarm_control_panel.blink_NAME" },
+    "notify": { "target":    "mobile_app_YOUR_PHONE" },
+    "lutron": {
+        "lights": { "kitchen": "light.kitchen_main" },
+        "scenes": { "movie":   "scene.movie_night" }
+    }
+}
+```
+
+Its sections are named after the Home Assistant features in
+[Switches](#switches), so the two files line up.
+
+Keys that differ per house carry the **home name**, using the same names as
+`state/presence.json` — so the default home `AMS` has `panel_AMS`, and a second
+house `M` adds `panel_M` beside it. One phone is shared by every home, so
+`notify.target` carries no home name.
+
+The `notify.target` entry (e.g. `mobile_app_aisingioro`) is only needed for the
+phone notification webhooks (`/webhook/notify/*`); it names the Home Assistant
 `notify` service target for your phone. The notification titles and messages are
 configurable in **`configs/notify_config.json`**, which also controls whether each
 event arms/disarms the alarm panel:
@@ -278,10 +307,12 @@ Presence — 3 people across 2 homes
 
 Notes and limits:
 
-- **All homes share one alarm panel and one phone.** `HA_ENTITY_ID` and
-  `HA_NOTIFY_TARGET` are not per-home, so a home-M arrival with `disarm: true`
-  disarms the same panel as home AMS. Only the text and the bookkeeping are
-  per-home.
+- **Each home arms its own panel.** The panel comes from `blink.panel_<home>` in
+  `home_assistant_entities.json`, so a home-M event with `disarm: true` disarms
+  `panel_M`. A home with no `panel_<home>` entry is an **error** — it never falls
+  back to another house's panel.
+- **Every home notifies the same phone.** `notify.target` carries no home name,
+  so the notification text is per-home but the destination is not.
 - **`all` is a reserved home name.** It is how a read asks for every house
   (matched case-insensitively), so writing to it is rejected.
 - **Home names are case-sensitive and created on first write.** `{"home": "m"}`
@@ -328,8 +359,8 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 
 | Method | Path                          | Description                        |
 | ------ | ----------------------------- | ---------------------------------- |
-| POST   | `/webhook/blink/arm`          | Arm the alarm panel                |
-| POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
+| POST   | `/webhook/blink/arm`          | Arm a home's alarm panel + notify your phone; `{"home": "<home>"}` |
+| POST   | `/webhook/blink/disarm`       | Disarm a home's alarm panel + notify your phone; `{"home": "<home>"}` |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](docs/Logging.md)) |
 | POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](docs/Uploads.md)) 🔒 |
 | POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home; `{"id": "<person>", "home": "<home>"}` 🔒 |
@@ -343,10 +374,21 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/location/purge`     | Trim history to `records` (default 10) or `days` 🔒 |
 | GET    | `/location`                   | Read back a person's last location as JSON; `?id=`, `?n=` 🔒 |
 | GET    | `/location/history`           | Read a person's location history as text; `?id=`, `?n=` 🔒 |
+| POST   | `/webhook/lutron/light`       | Turn a Lutron light on/off/toggle, set brightness % (see [Lutron](#lutron)) 🔒 |
+| POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
+| POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
 | POST   | `/location/notify/{id}/disable` | Stop notifying for this person 🔒 |
 | POST   | `/location/notify/{id}/toggle`  | Flip this person's notification switch 🔒 |
+| GET    | `/blink/notify`               | List the arm/disarm notification switches 🔒 |
+| GET    | `/ha`                         | List the Home Assistant feature switches 🔒 |
+| POST   | `/ha/{feature}/enable`        | Use this HA feature (`blink`/`notify`/`lutron`) 🔒 |
+| POST   | `/ha/{feature}/disable`       | Stop using this HA feature entirely 🔒 |
+| POST   | `/ha/{feature}/toggle`        | Flip this HA feature switch 🔒 |
+| POST   | `/blink/notify/{action}/enable`  | Notify on this blink action (`arm`/`disarm`) 🔒 |
+| POST   | `/blink/notify/{action}/disable` | Stop notifying on this blink action 🔒 |
+| POST   | `/blink/notify/{action}/toggle`  | Flip this blink action's notification switch 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
@@ -373,6 +415,17 @@ curl -X POST http://localhost:5050/webhook/blink/arm \
 # Disarm
 curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "X-Webhook-Secret: your-shared-secret-here"
+
+# Arming/disarming also notifies your phone. Its title/message come from
+# configs/notify_config.json under "blink_arm"/"blink_disarm", and each action has
+# an on/off switch in configs/notify_switches.json ("blink_control").
+# An optional "home" picks which panel: blink.panel_<home> in
+# configs/home_assistant_entities.json. Omit it for the default home.
+curl -X POST http://localhost:5050/webhook/blink/arm \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"home": "M"}'
+
 
 # Notify your phone (title/message default to configs/notify_config.json; override per request)
 # "id" names who left/arrived and is recorded in state/presence.json (defaults to "娜")
@@ -488,10 +541,10 @@ Every logged position also pushes a notification to your phone, through the same
 Home Assistant `notify` service the arrival/departure webhooks use. **Two
 switches** gate it, and both must be on:
 
-| Switch     | Where                                                     | Scope                                     |
-| ---------- | --------------------------------------------------------- | ----------------------------------------- |
-| master     | `configs/job_config.json` → `notify_phone`                 | every phone notification this server sends |
-| per person | `configs/location_notify_config.json` → `ids.<id>`         | one person's logged positions              |
+| Switch     | Where                                                          | Scope                                      |
+| ---------- | -------------------------------------------------------------- | ------------------------------------------ |
+| master     | `configs/job_switches.json` → `notify_phone`                   | every phone notification this server sends |
+| per person | `configs/notify_switches.json` → `location_log.<id>`           | one person's logged positions              |
 
 ```bash
 # Who is getting location notifications?
@@ -520,12 +573,13 @@ curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
 ```
 
 - A person nobody has toggled yet is **on**, and is written into
-  `location_notify_config.json` the first time they log a position — so they show
+  `notify_switches.json` the first time they log a position — so they show
   up in the listing and can be turned off. The file is created automatically:
 
   ```json
   {
-      "ids": { "Alex": true, "娜": false },
+      "location_log": { "Alex": true, "娜": false },
+      "blink_control": { "arm": true, "disarm": true },
       "last_modified": "2026-08-18 21:04:11.221"
   }
   ```
@@ -745,6 +799,274 @@ three actions:
 To log a position from the phone instead, use **Get Current Location** and POST
 its `Latitude` / `Longitude` to `/webhook/location/log`.
 
+## Lutron
+
+Control Lutron lights and scenes through Home Assistant. Home Assistant has no
+Lutron-specific API — both the `lutron` (RadioRA 2 / HomeWorks QS) and
+`lutron_caseta` (Caséta / RA3) integrations register ordinary entities, so this
+job calls the standard services:
+
+| Lutron device | HA entity | Service called |
+| ------------- | --------- | -------------- |
+| Dimmer | `light.*` | `light.turn_on` / `turn_off` / `toggle` |
+| Non-dim switch | `switch.*` | `switch.turn_on` / `turn_off` / `toggle` |
+| Scene / keypad button | `scene.*` | `scene.turn_on` |
+
+The service domain is taken from the **entity id itself**, not assumed — Lutron's
+non-dimming switches arrive as `switch.*` rather than `light.*`, and they cannot
+dim, so a brightness sent to one is an error rather than a silently dropped field.
+
+### Naming things
+
+Give an entity a short alias in the `lutron` section of
+**`configs/home_assistant_entities.json`**, or pass its full Home Assistant
+entity id. Anything containing a `.` is treated as an entity id, so both work and
+there is no mode flag:
+
+```json
+{
+    "lutron": {
+        "lights": {
+            "kitchen": "light.kitchen_main",
+            "living":  "light.living_room_dimmer",
+            "hallway": "switch.hallway_lights"
+        },
+        "scenes": {
+            "movie":     "scene.movie_night",
+            "goodnight": "scene.goodnight"
+        }
+    }
+}
+```
+
+Aliases keep entity ids in one place, so renaming something in Home Assistant is
+one config edit rather than a hunt through every Shortcut.
+`configs/home_assistant_entities.example.json` is a filled-in template. A missing
+or malformed file is not fatal — you lose the aliases, and raw entity ids still
+work.
+
+To list your own entity ids and the exact fields your Home Assistant accepts:
+
+```bash
+curl -s -H "Authorization: Bearer $HA_TOKEN" http://<hostID>:8123/api/states \
+  | python3 -c 'import json,sys; [print(e["entity_id"], "|", e["attributes"].get("friendly_name","")) for e in json.load(sys.stdin) if e["entity_id"].split(".")[0] in ("light","switch","scene","cover")]'
+```
+
+### Lights
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/light \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"light": "kitchen", "brightness": 40}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `light` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `state` | no | `on` / `off` / `toggle` (also JSON `true`/`false`); defaults to `on` |
+| `brightness` | no | **Percentage 0-100**, sent as HA's `brightness_pct`. Lights only |
+| `transition` | no | Fade time in seconds |
+
+```bash
+# All the shapes
+-d '{"light": "kitchen", "brightness": 40}'                    # on, at 40%
+-d '{"light": "kitchen", "state": "off", "transition": 2}'      # off over 2s
+-d '{"light": "kitchen", "state": "toggle"}'                    # flip it
+-d '{"light": "hallway", "state": "on"}'                        # a switch.* entity
+-d '{"light": "light.unlisted_lamp", "brightness": 100}'        # raw entity id
+```
+
+### Scenes
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/scene \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"scene": "movie"}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `scene` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `transition` | no | Fade time in seconds |
+
+**Home Assistant scenes cannot be turned off or toggled** — activating is the only
+thing a scene does. To undo one, activate another (a `goodnight` scene beside a
+`movie` scene). A `state` field on a scene request is ignored rather than an error.
+
+### SOS
+
+Blink a light or switch on and off as an attention signal. It always ends **off**.
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/sos \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"light": "kitchen"}'
+```
+
+```json
+{"status": "started", "entity_id": "light.kitchen_main", "duration": 10.0,
+ "interval": 2.0, "calls": 6, "estimated_seconds": 10.0,
+ "message": "Blinking light.kitchen_main for 10s every 2s, ending off"}
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `light` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `duration` | no | Total seconds to blink for; default 10, range 2-300 |
+| `interval` | no | Seconds per on and per off; default 2, range 1-60 |
+
+The default is 10 seconds alternating every 2 seconds — three on, three off:
+
+```text
+ON  off ON  off ON  off
+ 2   2   2   2   2   0     seconds  (6 service calls, ends off)
+```
+
+**Why seconds and not milliseconds.** Lutron hardware needs real time to switch.
+A sub-second blink is either invisible or arrives as a dim flicker, so the
+interval is in whole seconds and there is no Morse-code timing to get wrong.
+Every step still sends `transition: 0` so a dimmer's fade does not soften the
+edge, and `switch.*` entities — which snap, and take no `transition` — make the
+crispest target.
+
+**It returns immediately.** The blinking runs on a background thread, because
+holding the request open for 10-300 s would time out an iPhone Shortcut. The
+response says what was *started*; the outcome lands in the `blink` log:
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/logs/blink/read
+# -> LUTRON SOS light.kitchen_main: 10s at 2s, 6 calls, 0 failed, ended off
+```
+
+Notes and limits:
+
+- **Ends off, always.** If the last period was an on, a closing off is appended.
+  The previous state is not read or restored — the light is dark afterwards even
+  if it was on before.
+- **One SOS per entity at a time.** A second request while one is blinking returns
+  `Already running`. A different entity is unaffected, and the guard is released
+  even if the thread crashes.
+- **An `interval` longer than the `duration` is rejected**, since it would give a
+  single on with nothing after it.
+- Gated by the `lutron` feature switch and the `home_assistant_lutron` job switch,
+  exactly like the light and scene endpoints.
+
+### Switches and errors
+
+Two switches gate this job, like the other Home Assistant integrations:
+
+- `POST /ha/lutron/disable` — the whole integration stops; both endpoints return
+  `"skipped"` and no HTTP request is made.
+- `POST /jobs/home_assistant_lutron/disable` — both webhook paths stop responding, returning
+  `403 {"status": "disabled"}`.
+
+Every problem is reported in the JSON result rather than raised, and nothing
+reaches Home Assistant when a request is rejected:
+
+| Error | Cause |
+| ----- | ----- |
+| `Missing light` / `Missing scene` | no `light`/`scene`/`entity` field |
+| `Unknown light` / `Unknown scene` | not an alias and not an entity id; the message lists the known aliases |
+| `Invalid state` | `state` was not `on`/`off`/`toggle` |
+| `Invalid brightness` | not a number, or outside 0-100 |
+| `Invalid transition` | not a number, or negative |
+| `Not dimmable` | `brightness` sent to a `switch.*` entity |
+| `Conflicting request` | `brightness` combined with `state: "off"` |
+| `Wrong entity domain` | a scene sent to `/light`, or a light sent to `/scene` |
+| `Invalid duration` / `Invalid interval` | an SOS field outside its range, or interval > duration |
+| `Already running` | an SOS is already blinking that entity |
+
+## Switches
+
+Features are partitioned by switch file, one file per level of the system:
+
+```
+home_assistant_switches.json   do we talk to Home Assistant at all?
+  ├── blink                    ... to arm/disarm the Blink alarm panel
+  ├── notify                   ... to push notifications to a phone
+  └── lutron                   ... to control Lutron lights and scenes
+
+job_switches.json              which webhook jobs are live
+log_switches.json              which log types are written
+notify_switches.json           which notifications are actually sent
+```
+
+Two kinds of JSON file live in `configs/`, and the suffix tells you which:
+
+- **`*_switches.json`** — runtime on/off state. Entries appear automatically the
+  first time something is used, and you flip them over HTTP. Safe to edit, but
+  the endpoints are easier.
+- **`*_config.json`** — hand-written configuration. Nothing writes to these.
+
+Most features are gated by **two** switches, and both must be on for anything to
+happen: a **master** switch for the whole job, and a **per-key** switch for one
+log type, person, or action.
+
+| What it controls | File → section → key | Toggle with |
+| ---------------- | -------------------- | ----------- |
+| Arming/disarming the panel through Home Assistant, from **any** path | `home_assistant_switches.json` → `features.blink` | `POST /ha/blink/enable\|disable\|toggle` |
+| Sending **any** phone notification through Home Assistant | `home_assistant_switches.json` → `features.notify` | `POST /ha/notify/enable\|disable\|toggle` |
+| Controlling Lutron lights and scenes through Home Assistant | `home_assistant_switches.json` → `features.lutron` | `POST /ha/lutron/enable\|disable\|toggle` |
+| A whole job, including every webhook it owns | `job_switches.json` → `jobs.<job>` | `POST /jobs/<job>/enable\|disable\|toggle` |
+| One log type (`blink`, `upload`, `default`) | `log_switches.json` → `types.<type>` | `POST /logs/<type>/enable\|disable\|toggle` |
+| One person's location notification | `notify_switches.json` → `location_log.<id>` | `POST /location/notify/<id>/enable\|disable\|toggle` |
+| The arm / disarm notification | `notify_switches.json` → `blink_control.<action>` | `POST /blink/notify/<action>/enable\|disable\|toggle` |
+
+The master switch for **every** phone notification is the `notify_phone` job, so
+`POST /jobs/notify_phone/disable` silences the leaving/arriving, location, and
+arm/disarm notifications at once.
+
+**`home_assistant_switches.json` is the top tier.** Each feature is checked at the
+one place that Home Assistant API is called, so a single switch covers every
+caller:
+
+| Feature | Checked in | Covers |
+| ------- | ---------- | ------ |
+| `blink` | `set_alarm()` | `/webhook/blink/*` **and** the leaving/arriving webhooks |
+| `notify` | `notify_phone()` | the leaving/arriving, location, and arm/disarm notifications |
+| `lutron` | the `jobs.home_assistant_lutron` handlers | `/webhook/lutron/*` |
+
+A feature that is off makes the call a no-op reporting `"skipped"` — no HTTP
+request, and `home_assistant_config.json` is not even read, so a feature can be
+switched off before it is configured. The two are independent: you can keep the
+notifications while the panel is switched off, which is useful while a Home
+Assistant problem is being waited out.
+
+```bash
+# Stop touching the alarm panel, keep every notification
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/ha/blink/disable
+
+# What is on?
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/ha
+# -> {"features":[{"feature":"blink","enabled":false},{"feature":"lutron","enabled":true},{"feature":"notify","enabled":true}]}
+```
+
+An unknown key counts as **on** and is written to the file the first time it is
+checked, so it shows up in the listing and can be turned off afterwards. That
+also means a missing switch file is not an error — everything is simply enabled.
+
+### What is *not* a switch
+
+| File | Role |
+| ---- | ---- |
+| `config.json` | Routing table: webhook path → job module + function, and `require_secret` per path |
+| `notify_config.json` | The **text** of every notification (titles, messages, per-home overrides) |
+| `home_assistant_config.json` | Home Assistant URL, token, panel entity, notify target (gitignored) |
+| `webhook_secret.json` | The shared webhook secret (gitignored) |
+
+`notify_config.json` and `notify_switches.json` are the pair to keep straight:
+one says **what** a notification says, the other says **whether** it is sent.
+
+Two flags inside `notify_config.json` do behave like switches, but they gate the
+**alarm panel**, not a notification: `arm` on `leaving_home` and `disarm` on
+`arriving_home` decide whether those webhooks touch the panel at all. Turning off
+a `blink_control` switch only silences the notification — `/webhook/blink/*` still
+arms and disarms.
+
 ## Configuration
 
 **`configs/config.json`** maps webhook paths to job modules:
@@ -754,7 +1076,7 @@ its `Latitude` / `Longitude` to `/webhook/location/log`.
     "webhooks": [
         {
             "path": "/webhook/blink/arm",
-            "module": "jobs.home_assistant_arm_disarm",
+            "module": "jobs.home_assistant_blink",
             "require_secret": true
         }
     ]
@@ -792,24 +1114,51 @@ authenticated webhook. It is gitignored — copy it from the example and fill it
 }
 ```
 
-**`configs/location_notify_config.json`** holds one on/off switch per person for
-the notification a logged position sends (see
-[Notifying your phone](#notifying-your-phone-per-person)). It is created
-automatically and updated through the `/location/notify` endpoints:
+**`configs/notify_switches.json`** holds the on/off switches for every phone
+notification this server sends — one per person for logged positions
+(see [Notifying your phone](#notifying-your-phone-per-person)) and one per action
+for the arm/disarm notification (see [Switches](#switches)). It is created
+automatically and updated through the `/location/notify` and `/blink/notify`
+endpoints:
 
 ```json
 {
-    "ids": { "Alex": true }
+    "location_log": { "Alex": true },
+    "blink_control": { "arm": true, "disarm": true }
 }
 ```
 
-**`configs/job_config.json`** tracks which jobs are enabled. It is created automatically
+**`configs/home_assistant_entities.json`** holds every Home Assistant entity this
+server acts on — the alarm panel, the phone notify target, and the Lutron alias
+maps. It is tracked (no secrets), and its sections are named after the Home
+Assistant features:
+
+```json
+{
+    "blink":  { "panel_AMS": "alarm_control_panel.blink_armstrong" },
+    "notify": { "target":    "mobile_app_aisingioro" },
+    "lutron": { "lights": {}, "scenes": {} }
+}
+```
+
+**`configs/home_assistant_switches.json`** decides whether this server uses Home
+Assistant at all — `blink` for the alarm panel, `notify` for phone notifications,
+and `lutron` for lights and scenes (see [Switches](#switches)). It is created
+automatically and updated through the `/ha` endpoints:
+
+```json
+{
+    "features": { "blink": true, "notify": true, "home_assistant_lutron": true }
+}
+```
+
+**`configs/job_switches.json`** tracks which jobs are enabled. It is created automatically
 and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
 ```json
 {
     "jobs": {
-        "home_assistant_arm_disarm": true
+        "home_assistant_blink": true
     }
 }
 ```
@@ -817,10 +1166,11 @@ and updated through the `/jobs` endpoints — you rarely edit it by hand:
 ## Testing
 
 ```bash
-python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
+python3 jobs/home_assistant_blink.py        # exercise the job directly
 python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
+python3 tests/test_lutron.py                # Lutron light/scene job + shared HA API caller
 python3 tests/test_notify_phone.py          # phone notification job tests (incl. per-home text)
 python3 tests/test_presence_webhook.py      # presence read/write webhook tests (incl. multi-home)
 python3 tests/test_location.py              # location log/fetch/history/purge + notify tests

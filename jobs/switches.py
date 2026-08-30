@@ -3,19 +3,24 @@
 
 Several features are gated by the same pair of switches:
 
-  * a **master** switch — one job's entry in ``configs/job_config.json``, which
+  * a **master** switch — one job's entry in ``configs/job_switches.json``, which
     turns the whole feature on or off (and is toggled by the ``/jobs`` endpoints);
-  * a **per-key** switch — one entry per log type, per person, ... in the
-    feature's own JSON file, so parts of a feature can be turned off on their own.
+  * a **per-key** switch — one entry per log type, per person, per action, ... in
+    the feature's own JSON file, so parts of a feature can be turned off alone.
 
 Something happens only when BOTH are enabled. The logging engine uses this for
-its log types (``log_config.json``, section ``"types"``), and the location
-notifier for its people (``location_notify_config.json``, section ``"ids"``).
+its log types (``log_switches.json``, section ``"types"``), and the notification
+jobs for their people and actions (``notify_switches.json``, sections
+``"location_log"`` and ``"blink_control"``).
+
+Files whose name ends in ``_switches.json`` are runtime toggle state: entries
+appear in them automatically and may be flipped over HTTP. Files ending in
+``_config.json`` are hand-written configuration.
 
 A switch file looks like::
 
     {
-      "ids": { "娜": true, "Alex": false },
+      "location_log": { "娜": true, "Alex": false },
       "last_modified": "2026-08-18 21:04:11.221"
     }
 
@@ -25,9 +30,9 @@ is checked, so it shows up in the file and can be turned off later.
 Usage:
     from jobs.switches import master_enabled, is_enabled, set_enabled
 
-    master_enabled("notify_phone", JOB_CONFIG_PATH)   # the whole feature
-    is_enabled(SWITCH_FILE, "ids", "娜")               # one person
-    set_enabled(SWITCH_FILE, "ids", "娜", False)
+    master_enabled("notify_phone", JOB_SWITCHES_PATH)  # the whole feature
+    is_enabled(SWITCH_FILE, "location_log", "娜")       # one person
+    set_enabled(SWITCH_FILE, "location_log", "娜", False)
 """
 
 import datetime
@@ -41,8 +46,8 @@ logger = logging.getLogger(__name__)
 # The repo root is the parent of the jobs/ folder that holds this module.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Where the master switches live: job_config.json's "jobs" section.
-JOB_CONFIG_PATH = REPO_ROOT / "configs" / "job_config.json"
+# Where the master switches live: job_switches.json's "jobs" section.
+JOB_SWITCHES_PATH = REPO_ROOT / "configs" / "job_switches.json"
 JOBS_SECTION = "jobs"
 
 
@@ -117,13 +122,13 @@ def set_enabled(path, section: str, key: str, enabled: bool) -> bool:
 
 
 def master_enabled(job_name: str, path=None) -> bool:
-    """Return a job's master switch from job_config.json (unknown means on).
+    """Return a job's master switch from job_switches.json (unknown means on).
 
-    ``path`` defaults to :data:`JOB_CONFIG_PATH`, read at call time so a caller
+    ``path`` defaults to :data:`JOB_SWITCHES_PATH`, read at call time so a caller
     can point at its own copy of the file (the logging engine does) and so tests
     can redirect it.
     """
-    return bool(all_switches(path or JOB_CONFIG_PATH, JOBS_SECTION).get(job_name, True))
+    return bool(all_switches(path or JOB_SWITCHES_PATH, JOBS_SECTION).get(job_name, True))
 
 
 if __name__ == "__main__":
@@ -132,9 +137,9 @@ if __name__ == "__main__":
 
     with tempfile.TemporaryDirectory() as tmp:
         demo = Path(tmp) / "demo_switches.json"
-        print("unknown key   ->", is_enabled(demo, "ids", "娜"), "(auto-registered)")
-        print("after disable ->", set_enabled(demo, "ids", "娜", False))
-        print("is_enabled    ->", is_enabled(demo, "ids", "娜"))
-        print("all           ->", all_switches(demo, "ids"))
+        print("unknown key   ->", is_enabled(demo, "location_log", "娜"), "(auto-registered)")
+        print("after disable ->", set_enabled(demo, "location_log", "娜", False))
+        print("is_enabled    ->", is_enabled(demo, "location_log", "娜"))
+        print("all           ->", all_switches(demo, "location_log"))
         print("file          ->", demo.read_text(encoding="utf-8"))
     print("master 'log'  ->", master_enabled("log"))
