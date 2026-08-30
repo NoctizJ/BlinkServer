@@ -104,6 +104,10 @@ event arms/disarms the alarm panel:
   message, and arm/disarm flag, and `{home}` is replaced with the home's name —
   see [Multiple homes](#multiple-homes). `configs/notify_config.example.json`
   shows the shape.
+- The `blink_arm` / `blink_disarm` events hold the text for the notification
+  `/webhook/blink/*` sends. They take `{home}` (naming the house whose panel
+  changed) and default to `Blink Control {home} (A)` / `(D)`. There is no person
+  involved in arming a panel, so `{id}` is not offered there.
 - Every title also ends in an **arm/disarm postfix** — see
   [Arm/disarm postfix](#armdisarm-postfix).
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag

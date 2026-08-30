@@ -15,11 +15,11 @@
     "message_with_trigger": "{id} is at {address} ({time}) — {trigger}."
   },
   "blink_arm": {
-    "title": "Blink Control (A)",
+    "title": "Blink Control {home} (A)",
     "message": ""
   },
   "blink_disarm": {
-    "title": "Blink Control (D)",
+    "title": "Blink Control {home} (D)",
     "message": ""
   }
 }

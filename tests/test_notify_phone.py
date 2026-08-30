@@ -397,12 +397,12 @@ def test_blink_webhooks_notify_the_phone():
         # No config entry -> the built-in defaults.
         res = hd.arm()
         alarm.assert_called_once_with("arm", home=ps.DEFAULT_HOME)
-        assert sent.call_args[0] == ("Blink Control (A)", ""), sent.call_args[0]
+        assert sent.call_args[0] == (f"Blink Control {ps.DEFAULT_HOME} (A)", ""), sent.call_args[0]
         assert res["notify"]["status"] == "success", res
 
         sent.reset_mock()
         hd.disarm()
-        assert sent.call_args[0] == ("Blink Control (D)", ""), sent.call_args[0]
+        assert sent.call_args[0] == (f"Blink Control {ps.DEFAULT_HOME} (D)", ""), sent.call_args[0]
 
     # A configured title/message wins over the default.
     with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
@@ -413,6 +413,44 @@ def test_blink_webhooks_notify_the_phone():
         hd.arm()
         assert sent.call_args[0] == ("Panel armed", "Away mode"), sent.call_args[0]
     print("  OK: blink webhooks notify, config text overrides the defaults")
+
+
+def test_blink_notification_names_the_home():
+    """"{home}" in a blink title is replaced with the house that was changed."""
+    print("Testing {home} in the blink notification...")
+    import jobs.home_assistant_blink as hd
+
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text",
+                              return_value={"title": "Blink Control {home} (A)",
+                                            "message": "{home} panel changed"}), \
+            mock.patch.object(hd, "write_log"):
+        hd.arm({"home": "M"})
+        assert sent.call_args[0] == ("Blink Control M (A)", "M panel changed"), sent.call_args[0]
+
+        hd.arm({})                                    # no home -> the default
+        assert sent.call_args[0][0] == f"Blink Control {ps.DEFAULT_HOME} (A)", sent.call_args[0]
+
+    # The built-in fallbacks carry the placeholder too, so it is never sent raw.
+    for action, letter in (("arm", "A"), ("disarm", "D")):
+        title = hd.DEFAULT_BLINK_NOTIFY[action]["title"]
+        assert title == f"Blink Control {{home}} ({letter})", title
+
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text", return_value={}), \
+            mock.patch.object(hd, "write_log"):
+        hd.disarm({"home": "M"})
+        assert sent.call_args[0][0] == "Blink Control M (D)", sent.call_args[0]
+        assert "{home}" not in sent.call_args[0][0], "placeholder sent unfilled"
+
+    # And the shipped config uses it.
+    shipped = json.loads(
+        (Path(__file__).parent.parent / "configs" / "notify_config.json").read_text())
+    assert shipped["blink_arm"]["title"] == "Blink Control {home} (A)", shipped["blink_arm"]
+    assert shipped["blink_disarm"]["title"] == "Blink Control {home} (D)", shipped["blink_disarm"]
+    print("  OK: {home} filled from the payload, defaults and config agree")
 
 
 def test_blink_notification_survives_a_broken_panel():
@@ -427,7 +465,7 @@ def test_blink_notification_survives_a_broken_panel():
             mock.patch.object(hd, "write_log"):
         res = hd.arm()
         assert res["status"] == "error" and "config gone" in res["message"], res
-        assert sent.call_args[0][0] == "Blink Control (A)", sent.call_args[0]
+        assert sent.call_args[0][0].startswith("Blink Control"), sent.call_args[0]
         assert res["notify"]["status"] == "success", res
 
     # And a failing notification must not lose the arm result.
@@ -827,6 +865,7 @@ if __name__ == "__main__":
     test_notify_persists_presence_in_the_named_home()
     test_odd_homes_block_falls_back()
     test_blink_webhooks_notify_the_phone()
+    test_blink_notification_names_the_home()
     test_blink_notification_survives_a_broken_panel()
     test_leaving_arriving_send_exactly_one_notification()
     test_blink_notify_switches()

@@ -9,7 +9,10 @@ The two webhook handlers (``arm`` -> /webhook/blink/arm, ``disarm`` ->
 /webhook/blink/disarm) also push a phone notification, like the other notifying
 jobs do. Their titles and messages come from **configs/notify_config.json**
 under the ``blink_arm`` and ``blink_disarm`` events, falling back to
-:data:`DEFAULT_BLINK_NOTIFY`.
+:data:`DEFAULT_BLINK_NOTIFY`. A ``"{home}"`` in either is replaced with the house
+whose panel was changed, so one title serves every home::
+
+    "blink_arm": { "title": "Blink Control {home} (A)" }   -> "Blink Control M (A)"
 
 Two switches gate that notification, the same two-level shape the logging engine
 and the location notifier use (see :mod:`jobs.switches`):
@@ -60,7 +63,7 @@ try:
     from jobs.log_engine import log as write_log
     from jobs.home_assistant_entities import entity as ha_entity
     from jobs.presence_state import DEFAULT_HOME, resolve_home
-    from jobs.home_assistant_notify import load_event_text, notify_phone
+    from jobs.home_assistant_notify import fill_placeholders, load_event_text, notify_phone
     from jobs.home_assistant_switches import BLINK as HA_BLINK_FEATURE
     from jobs.home_assistant_switches import enabled_for as ha_feature_enabled
     from jobs.home_assistant_switches import skipped as ha_feature_skipped
@@ -69,7 +72,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
     from log_engine import log as write_log
     from home_assistant_entities import entity as ha_entity
     from presence_state import DEFAULT_HOME, resolve_home
-    from home_assistant_notify import load_event_text, notify_phone
+    from home_assistant_notify import fill_placeholders, load_event_text, notify_phone
     from home_assistant_switches import BLINK as HA_BLINK_FEATURE
     from home_assistant_switches import enabled_for as ha_feature_enabled
     from home_assistant_switches import skipped as ha_feature_skipped
@@ -95,10 +98,14 @@ SWITCH_SECTION = "blink_control"
 # notification, shared with jobs/notify_phone.py and jobs/location_notify.py.
 MASTER_SWITCH = "notify_phone"
 
+# Placeholder in a blink title/message replaced with the home's name. There is no
+# person involved in arming a panel, so "{id}" is deliberately not offered.
+HOME_PLACEHOLDER = "home"
+
 # Fallbacks when notify_config.json is missing or lacks the entry.
 DEFAULT_BLINK_NOTIFY = {
-    "arm": {"title": "Blink Control (A)", "message": ""},
-    "disarm": {"title": "Blink Control (D)", "message": ""},
+    "arm": {"title": "Blink Control {home} (A)", "message": ""},
+    "disarm": {"title": "Blink Control {home} (D)", "message": ""},
 }
 
 
@@ -118,15 +125,16 @@ def all_notify_enabled() -> Dict[str, bool]:
     return all_switches(SWITCH_FILE, SWITCH_SECTION)
 
 
-def _notify_blink(action: str) -> Dict[str, Any]:
+def _notify_blink(action: str, home: str = DEFAULT_HOME) -> Dict[str, Any]:
     """Send the phone notification for a /webhook/blink/<action> request.
 
     Gated by the master ``notify_phone`` switch and this action's own switch; a
     switch that is off yields a ``"skipped"`` result and no request. The
     title/message come from notify_config.json's ``blink_arm`` / ``blink_disarm``
-    entry, falling back to :data:`DEFAULT_BLINK_NOTIFY`. Problems are reported in
-    the return value rather than raised, so a broken notification never fails the
-    arm/disarm call.
+    entry, falling back to :data:`DEFAULT_BLINK_NOTIFY`, and a "{home}" in either
+    is replaced with the house whose panel was just changed. Problems are reported
+    in the return value rather than raised, so a broken notification never fails
+    the arm/disarm call.
     """
     if not master_enabled(MASTER_SWITCH):
         return {"status": "skipped",
@@ -137,8 +145,9 @@ def _notify_blink(action: str) -> Dict[str, Any]:
 
     defaults = DEFAULT_BLINK_NOTIFY[action]
     cfg = load_event_text(NOTIFY_EVENTS[action])
-    title = cfg.get("title") or defaults["title"]
-    message = cfg.get("message") or defaults["message"]
+    values = {HOME_PLACEHOLDER: home}
+    title = fill_placeholders(cfg.get("title") or defaults["title"], values)
+    message = fill_placeholders(cfg.get("message") or defaults["message"], values)
 
     try:
         return notify_phone(title, message)
@@ -320,7 +329,7 @@ def _run_blink_action(action: str, payload: Dict[str, Any] = None) -> Dict[str, 
             "message": error_msg,
         }
     result["home"] = home
-    result["notify"] = _notify_blink(action)
+    result["notify"] = _notify_blink(action, home)
     return result
 
 
