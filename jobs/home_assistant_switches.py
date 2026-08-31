@@ -7,7 +7,8 @@ Home Assistant *at all*, independently of which job or which notification asked:
     home_assistant_switches.json   does this server use Home Assistant?
       ├── blink                    ... to arm/disarm the Blink alarm panel
       ├── notify                   ... to push notifications to a phone
-      └── lutron                   ... to control Lutron lights and scenes
+      ├── lutron                   ... to control Lutron lights and scenes
+      └── speak                    ... to say something on a media player
 
     job_switches.json              which webhook jobs are live
     log_switches.json              which log types are written
@@ -20,7 +21,9 @@ called, so one switch covers every caller:
     ``/webhook/blink/*`` **and** the leaving/arriving webhooks;
   * ``notify`` — :func:`jobs.home_assistant_notify.notify_phone`, used by the
     leaving/arriving, location, and arm/disarm notifications;
-  * ``lutron`` — the :mod:`jobs.home_assistant_lutron` handlers, used by ``/webhook/lutron/*``.
+  * ``lutron`` — the :mod:`jobs.home_assistant_lutron` handlers, used by
+    ``/webhook/lutron/*``;
+  * ``speak`` — :mod:`jobs.home_assistant_speak`, used by ``/webhook/speak``.
 
 Turning a feature off makes the call a no-op that reports ``"skipped"`` — no HTTP
 request is made, and ``home_assistant_config.json`` is not even read, so a
@@ -29,7 +32,7 @@ feature can be switched off before it is configured. Nothing raises.
 The file looks like::
 
     {
-      "features": { "blink": true, "notify": true, "home_assistant_lutron": true },
+      "features": { "blink": true, "notify": true, "lutron": true, "speak": true },
       "last_modified": "2026-08-30 12:04:11.221"
     }
 
@@ -61,8 +64,11 @@ NOTIFY = "notify"
 # Controlling Lutron lights and scenes through Home Assistant.
 LUTRON = "lutron"
 
+# Speaking a message on a media player through Home Assistant.
+SPEAK = "speak"
+
 # Every feature this file governs, for validating a toggle request.
-FEATURES = (BLINK, NOTIFY, LUTRON)
+FEATURES = (BLINK, NOTIFY, LUTRON, SPEAK)
 
 
 def enabled_for(feature: str) -> bool:
@@ -95,6 +101,7 @@ if __name__ == "__main__":
     print("blink on?  ->", enabled_for(BLINK))
     print("notify on? ->", enabled_for(NOTIFY))
     print("lutron on? ->", enabled_for(LUTRON))
+    print("speak on?  ->", enabled_for(SPEAK))
     print("disable    ->", set_enabled_for(BLINK, False))
     print("skipped    ->", skipped(BLINK))
     print("re-enable  ->", set_enabled_for(BLINK, True))

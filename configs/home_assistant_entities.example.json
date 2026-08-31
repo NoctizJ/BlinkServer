@@ -17,5 +17,12 @@
       "goodnight": "scene.goodnight",
       "morning": "scene.good_morning"
     }
+  },
+  "speak": {
+    "tts": "tts.google_en_com",
+    "speakers": {
+      "homepod": "media_player.homepod_mini",
+      "kitchen": "media_player.kitchen_homepod"
+    }
   }
 }

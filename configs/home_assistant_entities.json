@@ -8,5 +8,9 @@
   "lutron": {
     "lights": {},
     "scenes": {}
+  },
+  "speak": {
+    "tts": "tts.google_en_com",
+    "speakers": {}
   }
 }

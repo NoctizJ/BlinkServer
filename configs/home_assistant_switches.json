@@ -2,7 +2,8 @@
   "features": {
     "blink": true,
     "notify": true,
-    "lutron": true
+    "lutron": true,
+    "speak": true
   },
   "last_modified": null
 }

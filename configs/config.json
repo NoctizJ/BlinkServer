@@ -101,6 +101,12 @@
       "module": "jobs.home_assistant_lutron",
       "function": "status",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/speak",
+      "module": "jobs.home_assistant_speak",
+      "function": "speak",
+      "require_secret": true
     }
   ]
 }

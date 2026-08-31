@@ -20,6 +20,8 @@ server code.
   the background, always ending off — see [SOS](#sos)
 - Lutron **light status report** — every configured light's state and brightness
   in one request — see [Light status](#light-status)
+- **Text-to-speech** — make a HomePod or any media player say a message, in any
+  language your TTS provider supports — see [Speak](#speak)
 - Home Assistant integration switchable by feature — turn the alarm panel, the phone
   notifications, or Lutron off entirely without touching config — see [Switches](#switches)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
@@ -383,6 +385,7 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/lutron/light`       | Turn a Lutron light on/off/toggle, set brightness % (see [Lutron](#lutron)) 🔒 |
 | POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
 | POST   | `/webhook/lutron/status`      | Report every configured light's state and brightness (see [Light status](#light-status)) 🔒 |
+| POST   | `/webhook/speak`              | Say a message on a media player (see [Speak](#speak)) 🔒 |
 | POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
@@ -390,7 +393,7 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/location/notify/{id}/toggle`  | Flip this person's notification switch 🔒 |
 | GET    | `/blink/notify`               | List the arm/disarm notification switches 🔒 |
 | GET    | `/ha`                         | List the Home Assistant feature switches 🔒 |
-| POST   | `/ha/{feature}/enable`        | Use this HA feature (`blink`/`notify`/`lutron`) 🔒 |
+| POST   | `/ha/{feature}/enable`        | Use this HA feature (`blink`/`notify`/`lutron`/`speak`) 🔒 |
 | POST   | `/ha/{feature}/disable`       | Stop using this HA feature entirely 🔒 |
 | POST   | `/ha/{feature}/toggle`        | Flip this HA feature switch 🔒 |
 | POST   | `/blink/notify/{action}/enable`  | Notify on this blink action (`arm`/`disarm`) 🔒 |
@@ -1045,6 +1048,144 @@ reaches Home Assistant when a request is rejected:
 | `Invalid duration` / `Invalid interval` | an SOS field outside its range, or interval > duration |
 | `Already running` | an SOS is already blinking that entity |
 
+## Speak
+
+Say something out loud on a HomePod, speaker, or any Home Assistant media player.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"message": "The alarm has been armed."}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `message` (or `text`) | yes | What to say; max 500 characters |
+| `id` | no | Who is asking; recorded in the log. Defaults to `娜`, like everywhere else |
+| `speaker` (or `media_player`) | see below | An alias from `home_assistant_entities.json`, or a full `media_player.*` entity id |
+| `language` | no | Passed to the provider, e.g. `en`, `ja`. Omit for its default |
+| `volume` | no | Speaker volume as a percentage, 1-100. Set before speaking, and it **stays** |
+
+`speaker` may be **omitted when exactly one is configured**. With several it must
+be named, and the error lists them — it will not guess which room to talk to.
+
+### Setup
+
+Both entity ids live in the `speak` section of
+**`configs/home_assistant_entities.json`**:
+
+```json
+"speak": {
+    "tts": "tts.google_en_com",
+    "speakers": {
+        "homepod": "media_player.homepod_mini",
+        "kitchen": "media_player.kitchen_homepod"
+    }
+}
+```
+
+Find your real ids — the `tts.*` one especially, whose name varies with the
+provider and language you added:
+
+```bash
+curl -s -H "Authorization: Bearer $HA_TOKEN" http://<hostID>:8123/api/states \
+  | python3 -c '
+import json,sys
+for e in json.load(sys.stdin):
+    if e["entity_id"].startswith(("media_player.","tts.")):
+        print(e["entity_id"], "|", e["attributes"].get("friendly_name",""))'
+```
+
+Adding a HomePod to Home Assistant: Settings → Devices & Services → Add
+Integration → **Apple TV** (it covers HomePods too, via AirPlay). It usually
+appears under Discovered already and needs no PIN.
+
+### Examples
+
+```bash
+# The only configured speaker
+-d '{"message": "Someone is at the door"}'
+
+# A named speaker, and who asked
+-d '{"message": "Dinner is ready", "speaker": "kitchen", "id": "Alex"}'
+
+# Japanese, on the HomePod
+-d '{"message": "おかえりなさい", "speaker": "homepod", "language": "ja"}'
+
+# A speaker with no alias
+-d '{"message": "Test", "speaker": "media_player.office_speaker"}'
+
+# Loud enough to hear from the next room
+-d '{"message": "Someone is at the door", "volume": 80}'
+```
+
+### Who said what
+
+Every request is written to the **default** log (`logs/default.log`) with the
+requester, the speaker, and the exact words — this is the one job that puts words
+in the house's mouth, so it is worth being able to answer "who made it say that?":
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/logs/default/read
+```
+
+```text
+================================================================================
+[2026-08-30 18:49:38.893] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by Alex on media_player.homepod_mini at 80% -> success
+"Dinner is ready"
+================================================================================
+[2026-08-30 18:49:38.894] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by 娜 on media_player.homepod_mini [ja] -> success
+"おかえりなさい。玄関の鍵が開いています。"
+================================================================================
+[2026-08-30 18:49:38.895] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by Sam ERROR: Configuration file not found
+"this one failed"
+```
+
+The spoken words sit on their own line — who/where/how on the first, what was
+actually said on the second — so a long announcement stays readable instead of
+running off the end. A failed request still records what was attempted.
+
+A post without an `id` is attributed to `娜`, the same default the presence,
+location and leaving/arriving webhooks use — an unlabelled request is still
+attributed to somebody. Note this goes to `default`, not the `blink` log the
+alarm and Lutron jobs use.
+
+### Notes and limits
+
+- **The TTS provider is the target, the speaker is a field.** Home Assistant's
+  `tts.speak` takes the `tts.*` entity as `entity_id` and the speaker as
+  `media_player_entity_id`, which is easy to get backwards. Putting a
+  `media_player` in the `tts` slot is caught with `Wrong TTS entity` rather than
+  passed to Home Assistant.
+- **`volume` is applied with a separate call, and it stays.** `tts.speak` has no
+  volume of its own, so a `volume` becomes a `media_player.volume_set` immediately
+  before the speech. It is **not** restored afterwards — `tts.speak` returns once
+  Home Assistant has queued the audio, not when the speech ends, so there is no
+  moment to restore at without guessing how long the message takes to say. Pass a
+  `volume` every time if you care what it is.
+- **A failed volume change does not stop the message.** Speaking at the wrong
+  volume beats silence, so the speech still goes out and the result carries a
+  `volume_error`.
+- **`volume: 0` is rejected**, since it would speak silently while reporting
+  success.
+- **It interrupts what is playing** and does not reliably resume it.
+- **The first AirPlay connection takes a second**, so very short messages can clip
+  at the start. Leading with "Attention," or a comma helps.
+- Gated by the `speak` feature switch and the `home_assistant_speak` job switch:
+
+  ```bash
+  curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+    http://localhost:5050/ha/speak/disable        # stop all text-to-speech
+  ```
+
 ## Switches
 
 Features are partitioned by switch file, one file per level of the system:
@@ -1053,7 +1194,8 @@ Features are partitioned by switch file, one file per level of the system:
 home_assistant_switches.json   do we talk to Home Assistant at all?
   ├── blink                    ... to arm/disarm the Blink alarm panel
   ├── notify                   ... to push notifications to a phone
-  └── lutron                   ... to control Lutron lights and scenes
+  ├── lutron                   ... to control Lutron lights and scenes
+  └── speak                    ... to say something on a media player
 
 job_switches.json              which webhook jobs are live
 log_switches.json              which log types are written
@@ -1076,6 +1218,7 @@ log type, person, or action.
 | Arming/disarming the panel through Home Assistant, from **any** path | `home_assistant_switches.json` → `features.blink` | `POST /ha/blink/enable\|disable\|toggle` |
 | Sending **any** phone notification through Home Assistant | `home_assistant_switches.json` → `features.notify` | `POST /ha/notify/enable\|disable\|toggle` |
 | Controlling Lutron lights and scenes through Home Assistant | `home_assistant_switches.json` → `features.lutron` | `POST /ha/lutron/enable\|disable\|toggle` |
+| Speaking a message on a media player through Home Assistant | `home_assistant_switches.json` → `features.speak` | `POST /ha/speak/enable\|disable\|toggle` |
 | A whole job, including every webhook it owns | `job_switches.json` → `jobs.<job>` | `POST /jobs/<job>/enable\|disable\|toggle` |
 | One log type (`blink`, `upload`, `default`) | `log_switches.json` → `types.<type>` | `POST /logs/<type>/enable\|disable\|toggle` |
 | One person's location notification | `notify_switches.json` → `location_log.<id>` | `POST /location/notify/<id>/enable\|disable\|toggle` |
@@ -1094,6 +1237,7 @@ caller:
 | `blink` | `set_alarm()` | `/webhook/blink/*` **and** the leaving/arriving webhooks |
 | `notify` | `notify_phone()` | the leaving/arriving, location, and arm/disarm notifications |
 | `lutron` | the `jobs.home_assistant_lutron` handlers | `/webhook/lutron/*` |
+| `speak` | `jobs.home_assistant_speak` | `/webhook/speak` |
 
 A feature that is off makes the call a no-op reporting `"skipped"` — no HTTP
 request, and `home_assistant_config.json` is not even read, so a feature can be
@@ -1209,12 +1353,13 @@ Assistant features:
 
 **`configs/home_assistant_switches.json`** decides whether this server uses Home
 Assistant at all — `blink` for the alarm panel, `notify` for phone notifications,
-and `lutron` for lights and scenes (see [Switches](#switches)). It is created
-automatically and updated through the `/ha` endpoints:
+`lutron` for lights and scenes, and `speak` for text-to-speech (see
+[Switches](#switches)). It is created automatically and updated through the `/ha`
+endpoints:
 
 ```json
 {
-    "features": { "blink": true, "notify": true, "home_assistant_lutron": true }
+    "features": { "blink": true, "notify": true, "lutron": true, "speak": true }
 }
 ```
 
@@ -1237,6 +1382,7 @@ python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
 python3 tests/test_lutron.py                # Lutron light/scene job + shared HA API caller
+python3 tests/test_speak.py                 # text-to-speech job tests
 python3 tests/test_notify_phone.py          # phone notification job tests (incl. per-home text)
 python3 tests/test_presence_webhook.py      # presence read/write webhook tests (incl. multi-home)
 python3 tests/test_location.py              # location log/fetch/history/purge + notify tests
