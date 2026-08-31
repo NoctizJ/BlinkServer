@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -449,6 +450,27 @@ def test_purge_leaves_hand_placed_files_alone():
 WAV_BYTES = b"RIFF" + bytes(4) + b"WAVE" + bytes(3000)
 
 
+def _real_audio(suffix):
+    """Render a genuine audio file in `suffix`, or None if the tools are absent.
+
+    Built with macOS `say` and `afconvert` so the conversion tests exercise real
+    m4a/aiff containers rather than a stub that afconvert would reject.
+    """
+    if not (shutil.which("say") and shutil.which("afconvert")):
+        return None
+    work = Path(tempfile.mkdtemp())
+    aiff = work / "src.aiff"
+    subprocess.run(["say", "-o", str(aiff), "--", "Someone is at the door"],
+                   capture_output=True, check=True)
+    if suffix == ".aiff":
+        return aiff.read_bytes()
+    fmt = {".m4a": ("m4af", "aac"), ".wav": ("WAVE", "LEI16@44100")}[suffix]
+    out = work / f"src{suffix}"
+    subprocess.run(["afconvert", "-f", fmt[0], "-d", fmt[1], str(aiff), str(out)],
+                   capture_output=True, check=True)
+    return out.read_bytes()
+
+
 def _client():
     """A Flask test client and the secret header, or ``(None, None)`` to skip."""
     try:
@@ -471,6 +493,124 @@ def _upload(client, headers, **fields):
     response = client.post("/webhook/speak/upload", headers=headers, data=data,
                            content_type="multipart/form-data")
     return response.get_json()["result"]
+
+
+def test_iphone_formats_are_converted_on_upload():
+    """m4a and aiff cannot be streamed, so they are transcoded to WAV."""
+    print("Testing iPhone-format conversion...")
+    client, headers = _client()
+    if not client:
+        return
+    import miniaudio
+
+    # An iPhone can only produce these two, and RAOP can stream neither.
+    for suffix in (".m4a", ".aiff"):
+        raw = _real_audio(suffix)
+        if raw is None:
+            print(f"  SKIP: say/afconvert unavailable, cannot build a real {suffix}")
+            return
+
+        # Confirm the premise: pyatv's decoder really cannot read it as-is.
+        probe = Path(tempfile.mkdtemp()) / f"probe{suffix}"
+        probe.write_bytes(raw)
+        try:
+            miniaudio.get_file_info(str(probe))
+            raise AssertionError(f"{suffix} decoded, so conversion would be pointless")
+        except miniaudio.DecodeError:
+            pass
+
+        with airplay_env(config=ONE_SPEAKER) as env:
+            data = {"file": (io.BytesIO(raw), f"memo{suffix}"), "name": "doorbell"}
+            res = client.post("/webhook/speak/upload", headers=headers, data=data,
+                              content_type="multipart/form-data").get_json()["result"]
+            assert res["status"] == "ok", (suffix, res)
+            # Stored as WAV, with the original format reported.
+            assert res["stored_as"] == "doorbell.wav", (suffix, res)
+            assert res["converted_from"] == suffix, (suffix, res)
+            assert env.drain("10.0.0.155")
+
+            stored = env.audio / "doorbell.wav"
+            info = miniaudio.get_file_info(str(stored))
+            assert info.file_format.name == "WAV", (suffix, info.file_format)
+            assert info.sample_rate == 44100, info.sample_rate
+            assert info.duration > 0.5, info.duration
+            # And it is what actually got streamed.
+            assert env.streamed[-1][1] == stored, env.streamed[-1]
+
+            # No half-converted upload left anywhere.
+            assert sorted(f.name for f in env.audio.iterdir()) == ["doorbell.wav"]
+            assert not list(Path(tempfile.gettempdir()).glob("airplay_upload_*"))
+    print("  OK: m4a and aiff transcoded to streamable 44.1kHz WAV")
+
+
+def test_playable_formats_are_not_converted():
+    """A wav/mp3/flac/ogg upload is stored byte-for-byte."""
+    print("Testing that streamable uploads pass through...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        res = _upload(client, headers, name="chime.wav")
+        assert env.drain("10.0.0.155")
+        assert res["converted_from"] is None, res
+        assert res["stored_as"] == "chime.wav", res
+        # Untouched: same bytes in as out.
+        assert (env.audio / "chime.wav").read_bytes() == WAV_BYTES
+    print("  OK: streamable formats stored unchanged")
+
+
+def test_conversion_failure_is_reported():
+    """A file afconvert cannot read is an error, and nothing is left behind."""
+    print("Testing conversion failure...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        # Claims to be m4a but is not, so afconvert refuses it.
+        data = {"file": (io.BytesIO(b"not really audio at all"), "memo.m4a")}
+        res = client.post("/webhook/speak/upload", headers=headers, data=data,
+                          content_type="multipart/form-data").get_json()["result"]
+        assert res["error"] == "Could not convert the audio", res
+        assert "afconvert" in res["message"], res
+        # No partial file in audio/, and no temp left in the system temp dir.
+        assert not env.audio.exists() or not list(env.audio.iterdir()), list(env.audio.iterdir())
+        assert not list(Path(tempfile.gettempdir()).glob("airplay_upload_*"))
+
+        # A missing afconvert says so rather than crashing.
+        with mock.patch.object(ap.subprocess, "run", side_effect=FileNotFoundError()):
+            data = {"file": (io.BytesIO(b"x"), "memo.m4a")}
+            res = client.post("/webhook/speak/upload", headers=headers, data=data,
+                              content_type="multipart/form-data").get_json()["result"]
+            assert res["error"] == "Could not convert the audio", res
+            assert "needs macOS" in res["message"], res
+    print("  OK: a bad conversion is reported, no partial file kept")
+
+
+def test_format_is_detected_without_a_filename():
+    """A Shortcut part with no filename is identified by its MIME type."""
+    print("Testing format detection by MIME type...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        # Extension known from `name` even though the part has no filename.
+        assert ap._source_suffix("doorbell.m4a", mock.Mock(filename="", mimetype="")) == ".m4a"
+        # MIME type when neither filename nor name helps.
+        for mimetype, expected in (("audio/x-m4a", ".m4a"), ("audio/mp4", ".m4a"),
+                                   ("audio/aiff", ".aiff"), ("audio/wav", ".wav"),
+                                   ("audio/mpeg", ".mp3")):
+            got = ap._source_suffix(None, mock.Mock(filename="", mimetype=mimetype))
+            assert got == expected, (mimetype, got)
+        # Nothing recognisable at all.
+        assert ap._source_suffix(None, mock.Mock(filename="x.txt", mimetype="text/plain")) is None
+
+        res = _upload(client, headers, _filename="notes.txt")
+        assert res["error"] == "Invalid name", res
+        assert ".m4a" in res["message"], "the error should list convertible formats too"
+    print("  OK: filename, name, then MIME type; unrecognisable is refused")
 
 
 def test_upload_stores_then_plays():
@@ -570,7 +710,9 @@ def test_uploads_survive_purge():
         return
 
     with airplay_env(config=ONE_SPEAKER) as env:
-        for name in ("doorbell.wav", "chime.mp3", "front-door.wav"):
+        # The uploaded bytes are a WAV, so each is stored .wav whatever the
+        # requested extension — the real format wins over the asked-for name.
+        for name in ("doorbell", "chime.mp3", "front-door.wav"):
             _upload(client, headers, name=name)
             assert env.drain("10.0.0.155")
 
@@ -582,7 +724,7 @@ def test_uploads_survive_purge():
         assert res["removed"] == 1, res            # only the synthesized one
         assert not mine.exists(), "the synthesized recording should have gone"
         survivors = sorted(f.name for f in env.audio.iterdir())
-        assert survivors == ["chime.mp3", "doorbell.wav", "front-door.wav"], survivors
+        assert survivors == ["chime.wav", "doorbell.wav", "front-door.wav"], survivors
     print("  OK: purge removes only synthesized speech; uploads persist")
 
 
@@ -811,6 +953,10 @@ if __name__ == "__main__":
     test_file_cannot_escape_the_audio_directory()
     test_file_validation()
     test_purge_leaves_hand_placed_files_alone()
+    test_iphone_formats_are_converted_on_upload()
+    test_playable_formats_are_not_converted()
+    test_conversion_failure_is_reported()
+    test_format_is_detected_without_a_filename()
     test_upload_stores_then_plays()
     test_upload_naming()
     test_upload_cannot_use_the_reserved_prefix()

@@ -1267,7 +1267,7 @@ curl -X POST http://localhost:5050/webhook/speak/upload \
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| the file part | yes | The audio: `.wav`, `.mp3`, `.flac` or `.ogg` |
+| the file part | yes | The audio. `.wav` `.mp3` `.flac` `.ogg` are stored as-is; `.m4a` `.aiff` `.aac` `.caf` are converted |
 | `name` (or `as`) | no | What to store it as. Without one, a date and time is used |
 | `speaker` (or `host`) | see note | Alias or address; optional when only one is configured |
 | `volume` | no | 1-100, applied before playback |
@@ -1279,9 +1279,40 @@ path separator and `:` is awkward on several filesystems, so a plain
 stand in for it.
 
 An extension is added if your `name` lacks one, taken from the uploaded file or
-its MIME type. Only the **basename** of `name` is used, so `../../etc/evil.wav`
-becomes `evil.wav` inside `audio/`. Re-using a name replaces the file and reports
+its MIME type. The **real** format wins over the requested one, so asking for
+`name=chime.mp3` while uploading a WAV stores `chime.wav` rather than mislabelling
+it. Only the **basename** of `name` is used, so `../../etc/evil.wav` becomes
+`evil.wav` inside `audio/`. Re-using a name replaces the file and reports
 `"replaced": true`.
+
+#### iPhone audio is converted automatically
+
+An iPhone can only produce **`.m4a`** (Voice Memos, Shortcuts recordings) or
+**`.aiff`**, and RAOP can stream **neither** — pyatv decodes audio with miniaudio,
+which reads only WAV, FLAC, MP3 and Vorbis. AIFF fails too, despite being
+uncompressed, because the container is not one it parses.
+
+So those are transcoded on the way in with macOS's own `/usr/bin/afconvert` — no
+extra dependency:
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/upload \\
+  -H "X-Webhook-Secret: your-shared-secret-here" \\
+  -F "file=@memo.m4a" -F "name=doorbell"
+```
+
+```json
+{"status": "ok", "stored_as": "doorbell.wav", "converted_from": ".m4a",
+ "bytes": 146684, "play": {"status": "started"}}
+```
+
+`stored_as` ends `.wav` because that is what is now on disk; `converted_from`
+tells you what arrived. A file already in a streamable format is stored
+byte-for-byte with `"converted_from": null`.
+
+The conversion runs on a temp file outside `audio/`, so a failed or half-finished
+convert never leaves anything behind — and if `afconvert` rejects the file you get
+`Could not convert the audio` with its actual complaint.
 
 **`speak_*` names are rejected.** That prefix is reserved for synthesized speech
 and is the only pattern [purge](#purging-recordings) deletes — so nothing you

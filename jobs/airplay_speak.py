@@ -85,6 +85,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -145,17 +146,38 @@ FILE_KEYS = ("file", "filename")
 # The name to store an upload under (POST /webhook/speak/upload).
 NAME_KEYS = ("name", "as")
 
-# What pyatv can stream. Checked up front so an unplayable file is a clear error
-# rather than a failure inside the stream.
+# `say` writes a WAV that pyatv can stream. AIFF is `say`'s default and RAOP does
+# not accept it, so the data format is given explicitly.
+SAY_DATA_FORMAT = "LEI16@44100"
+
+# What pyatv can actually stream. RAOP audio is decoded by miniaudio, which
+# parses exactly these containers — verified with miniaudio.FileFormat.
 PLAYABLE_SUFFIXES = (".wav", ".mp3", ".flac", ".ogg")
+
+# What an iPhone produces. None of these can be streamed — not even AIFF, which
+# is uncompressed but in a container miniaudio does not read — so an upload in
+# one of them is transcoded to WAV on the way in. Without this the upload
+# endpoint could not accept anything recorded on a phone.
+CONVERTIBLE_SUFFIXES = (".m4a", ".aiff", ".aif", ".aifc", ".aac", ".caf", ".mp4", ".m4r")
+
+# macOS ships afconvert, so transcoding needs no extra dependency. The output
+# format matches what `say` is asked for, and what AirPlay wants natively.
+CONVERT_COMMAND = ("afconvert", "-f", "WAVE", "-d", SAY_DATA_FORMAT)
+CONVERT_TIMEOUT = 60
+
+# MIME types a client may send that the filename does not reveal. Only consulted
+# when the extension is missing or unhelpful.
+MIME_SUFFIXES = {
+    "audio/x-m4a": ".m4a", "audio/m4a": ".m4a", "audio/mp4": ".m4a",
+    "audio/aiff": ".aiff", "audio/x-aiff": ".aiff",
+    "audio/aac": ".aac", "audio/wav": ".wav", "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3", "audio/flac": ".flac", "audio/ogg": ".ogg",
+}
 
 # Same cap as the Home Assistant speaker. Also bounds how long a single stream
 # can hold the speaker: ~500 characters is well under a minute of speech.
 MAX_MESSAGE_LENGTH = 500
 
-# `say` writes a WAV that pyatv can stream. AIFF is `say`'s default and RAOP does
-# not accept it, so the data format is given explicitly.
-SAY_DATA_FORMAT = "LEI16@44100"
 
 # Seconds to allow for synthesis and for the whole stream. A stream runs for the
 # length of the audio, so this is generous rather than tight.
@@ -601,32 +623,42 @@ def _has_content(storage) -> bool:
     return size > 0
 
 
-def _upload_name(given: Optional[str], storage) -> Tuple[Optional[str], Optional[str]]:
-    """Decide what to store an upload as, or return an error text.
+def _source_suffix(given: Optional[str], storage) -> Optional[str]:
+    """Work out what kind of audio was uploaded, or ``None`` if unrecognisable.
+
+    The filename is trusted first, then the caller's ``name``, then the MIME type
+    — a Shortcut often sends a part with no filename at all.
+    """
+    known = PLAYABLE_SUFFIXES + CONVERTIBLE_SUFFIXES
+    for candidate in (Path(storage.filename or "").suffix,
+                      Path(str(given or "")).suffix):
+        if candidate.lower() in known:
+            return candidate.lower()
+
+    mimetype = (storage.mimetype or "").lower()
+    if mimetype in MIME_SUFFIXES:
+        return MIME_SUFFIXES[mimetype]
+    guessed = (mimetypes.guess_extension(mimetype) or "").lower()
+    return guessed if guessed in known else None
+
+
+def _upload_name(given: Optional[str], storage) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Decide what to store an upload as: ``(stored_name, source_suffix, error)``.
 
     With no ``name``, a timestamp is used. Note the separators: ``/`` is a path
     separator and ``:`` is awkward on several filesystems and in URLs, so
     ``2026-08-31_16-30-11.wav`` stands in for a plain date-and-time.
 
-    The extension comes from the given name when it has a playable one, otherwise
-    from the uploaded file, otherwise from its MIME type.
+    Anything in :data:`CONVERTIBLE_SUFFIXES` is stored as ``.wav``, because that is
+    what it will be converted to.
     """
-    # Work out the extension first, so a name given without one still gets one.
-    suffix = ""
-    if given:
-        candidate = Path(str(given)).suffix.lower()
-        if candidate in PLAYABLE_SUFFIXES:
-            suffix = candidate
-    if not suffix:
-        candidate = Path(storage.filename or "").suffix.lower()
-        if candidate in PLAYABLE_SUFFIXES:
-            suffix = candidate
-    if not suffix:
-        guessed = (mimetypes.guess_extension(storage.mimetype or "") or "").lower()
-        suffix = guessed if guessed in PLAYABLE_SUFFIXES else ""
-    if not suffix:
-        return None, (f"cannot tell what kind of audio this is - name it with one of: "
-                      f"{', '.join(PLAYABLE_SUFFIXES)}")
+    source = _source_suffix(given, storage)
+    if source is None:
+        return None, None, (
+            f"cannot tell what kind of audio this is - send one of: "
+            f"{', '.join(PLAYABLE_SUFFIXES + CONVERTIBLE_SUFFIXES)}")
+
+    stored_suffix = ".wav" if source in CONVERTIBLE_SUFFIXES else source
 
     if given:
         # Only the basename, so a name cannot place the file outside audio/.
@@ -637,10 +669,35 @@ def _upload_name(given: Optional[str], storage) -> Tuple[Optional[str], Optional
     # speak_ is this job's own prefix and the only thing purge deletes. Reserving
     # it means an upload can never be trimmed away by POST /webhook/speak/purge.
     if stem.lower().startswith(AUDIO_PREFIX.rstrip("_").lower()):
-        return None, (f"{stem!r} may not start with {AUDIO_PREFIX!r} - that prefix is "
-                      f"reserved for synthesized speech, which purge deletes")
+        return None, None, (
+            f"{stem!r} may not start with {AUDIO_PREFIX!r} - that prefix is "
+            f"reserved for synthesized speech, which purge deletes")
 
-    return f"{stem}{suffix}", None
+    return f"{stem}{stored_suffix}", source, None
+
+
+def _convert(source: Path, target: Path) -> Optional[str]:
+    """Transcode to a WAV that RAOP can stream, or return an error text.
+
+    Uses macOS's own ``afconvert``. Called with an argument list, never a shell
+    string, so a filename cannot be read as shell syntax.
+    """
+    try:
+        result = subprocess.run(
+            list(CONVERT_COMMAND) + [str(source), str(target)],
+            capture_output=True, text=True, timeout=CONVERT_TIMEOUT,
+        )
+    except FileNotFoundError:
+        return "afconvert not found - conversion needs macOS"
+    except subprocess.TimeoutExpired:
+        return f"afconvert timed out after {CONVERT_TIMEOUT}s"
+
+    if result.returncode != 0:
+        target.unlink(missing_ok=True)
+        return f"afconvert failed ({result.returncode}): {result.stderr.strip()[:200]}"
+    if not target.is_file() or target.stat().st_size == 0:
+        return "afconvert produced no audio"
+    return None
 
 
 def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -654,6 +711,11 @@ def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
       * ``speaker`` — alias or address, optional when only one is configured
       * ``volume`` — 1-100, applied before playback
       * ``id`` — who uploaded it, for the log
+
+    An iPhone can only produce ``.m4a`` or ``.aiff``, neither of which RAOP can
+    stream, so those (and the other :data:`CONVERTIBLE_SUFFIXES`) are transcoded to
+    WAV with macOS's ``afconvert`` on the way in. ``stored_as`` then ends ``.wav``
+    and ``converted_from`` says what arrived.
 
     **The file is stored even if playback fails**, so a bad speaker address does
     not cost you the upload; the result reports each half separately.
@@ -706,9 +768,10 @@ def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     if error_msg:
         return _error("Invalid volume", error_msg)
 
-    stored_as, error_msg = _upload_name(_first(fields, NAME_KEYS), parts[0])
+    stored_as, source_suffix, error_msg = _upload_name(_first(fields, NAME_KEYS), parts[0])
     if error_msg:
         return _error("Invalid name", error_msg)
+    converting = source_suffix in CONVERTIBLE_SUFFIXES
 
     name = _first(fields, SPEAKER_KEYS)
     address = resolve_speaker(name)
@@ -724,15 +787,34 @@ def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     AUDIO_DIR.mkdir(exist_ok=True)
     target = AUDIO_DIR / stored_as
     replaced = target.exists()
-    try:
-        parts[0].save(target)
-    except OSError as e:
-        return _error("Could not store the file", str(e))
+
+    if not converting:
+        try:
+            parts[0].save(target)
+        except OSError as e:
+            return _error("Could not store the file", str(e))
+    else:
+        # afconvert needs a file on disk. The upload goes to a temp path outside
+        # audio/ so a half-converted file is never visible or purgeable, and only
+        # the finished WAV lands in audio/.
+        handle, raw = tempfile.mkstemp(prefix="airplay_upload_", suffix=source_suffix)
+        os.close(handle)
+        raw_path = Path(raw)
+        try:
+            parts[0].save(raw_path)
+            error_msg = _convert(raw_path, target)
+            if error_msg:
+                return _error("Could not convert the audio", error_msg)
+        except OSError as e:
+            return _error("Could not store the file", str(e))
+        finally:
+            raw_path.unlink(missing_ok=True)
 
     size = target.stat().st_size
     write_log(
         LOG_TYPE,
         f"AIRPLAY UPLOAD by {person}: {stored_as} ({size} bytes"
+        f"{f', converted from {source_suffix}' if converting else ''}"
         f"{', replaced' if replaced else ''})",
     )
 
@@ -742,6 +824,7 @@ def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
         "stored_as": stored_as,
         "original": parts[0].filename or None,
         "bytes": size,
+        "converted_from": source_suffix if converting else None,
         "replaced": replaced,
         "speaker": address,
         "volume": volume,
