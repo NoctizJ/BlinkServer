@@ -103,9 +103,21 @@
       "require_secret": true
     },
     {
-      "path": "/webhook/speak",
+      "path": "/webhook/speak/ha",
       "module": "jobs.home_assistant_speak",
       "function": "speak",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/airplay",
+      "module": "jobs.airplay_speak",
+      "function": "speak",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/purge",
+      "module": "jobs.airplay_speak",
+      "function": "purge",
       "require_secret": true
     }
   ]

@@ -3,7 +3,7 @@
     "blink": true,
     "notify": true,
     "lutron": true,
-    "speak": true
+    "speak": false
   },
   "last_modified": null
 }

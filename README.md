@@ -20,8 +20,9 @@ server code.
   the background, always ending off — see [SOS](#sos)
 - Lutron **light status report** — every configured light's state and brightness
   in one request — see [Light status](#light-status)
-- **Text-to-speech** — make a HomePod or any media player say a message, in any
-  language your TTS provider supports — see [Speak](#speak)
+- **Text-to-speech, two ways** — via Home Assistant, or straight to a HomePod over
+  AirPlay with no Home Assistant at all — see [Speak](#speak) and
+  [Speak (AirPlay)](#speak-airplay)
 - Home Assistant integration switchable by feature — turn the alarm panel, the phone
   notifications, or Lutron off entirely without touching config — see [Switches](#switches)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
@@ -385,7 +386,9 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/lutron/light`       | Turn a Lutron light on/off/toggle, set brightness % (see [Lutron](#lutron)) 🔒 |
 | POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
 | POST   | `/webhook/lutron/status`      | Report every configured light's state and brightness (see [Light status](#light-status)) 🔒 |
-| POST   | `/webhook/speak`              | Say a message on a media player (see [Speak](#speak)) 🔒 |
+| POST   | `/webhook/speak/ha`           | Say a message via Home Assistant (see [Speak](#speak)) 🔒 |
+| POST   | `/webhook/speak/airplay`      | Say a message straight to an AirPlay speaker (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
+| POST   | `/webhook/speak/purge`        | Trim `audio/` to the N most recent recordings 🔒 |
 | POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
@@ -1053,7 +1056,7 @@ reaches Home Assistant when a request is rejected:
 Say something out loud on a HomePod, speaker, or any Home Assistant media player.
 
 ```bash
-curl -X POST http://localhost:5050/webhook/speak \
+curl -X POST http://localhost:5050/webhook/speak/ha \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-shared-secret-here" \
   -d '{"message": "The alarm has been armed."}'
@@ -1186,6 +1189,134 @@ alarm and Lutron jobs use.
     http://localhost:5050/ha/speak/disable        # stop all text-to-speech
   ```
 
+## Speak (AirPlay)
+
+Say something on a HomePod or any AirPlay speaker **without Home Assistant** —
+macOS renders the words and pyatv streams them straight to the speaker.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/airplay \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"message": "Dinner is ready"}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `message` (or `text`) | yes | What to say; max 500 characters |
+| `speaker` (or `host`) | see note | An alias from `airplay_config.json`, or a raw IP |
+| `volume` | no | Speaker volume 1-100, set before speaking |
+| `voice` | no | A macOS voice name, overriding the configured one |
+| `id` | no | Who is asking; recorded in the log. Defaults to `娜` |
+
+`speaker` may be omitted when exactly one is configured.
+
+### How it works
+
+```text
+text -> say -> audio/speak_<time>_<id>.wav -> pyatv RAOP stream_file -> speaker
+```
+
+`say` is macOS's built-in text-to-speech: entirely local, no API key, no network.
+It writes 44.1 kHz 16-bit PCM, which is AirPlay's native format so nothing has to
+resample.
+
+The audio goes over **RAOP** — the AirPlay *audio* protocol. Note that
+`atv.stream.play_url` is pyatv's *AirPlay* (Apple TV) API and raises
+`NotSupportedError` on a HomePod; `stream_file` is the RAOP one, and it sends the
+bytes directly, so nothing needs to serve the file over HTTP.
+
+**This job must run on the speaker's LAN.** RAOP is a local protocol — that is
+exactly why Home Assistant in Docker could not find the HomePod.
+
+### Setup
+
+```bash
+pip install pyatv          # only this job needs it
+```
+
+`configs/airplay_config.json`:
+
+```json
+{
+    "speakers": { "bedroom": "10.0.0.155" },
+    "voice": null,
+    "rate": null
+}
+```
+
+Find your speaker and confirm it offers RAOP:
+
+```bash
+atvremote scan
+# Name: Bedroom   Address: 10.0.0.155
+#  - Protocol: RAOP, Port: 7000, Credentials: None, Pairing: NotNeeded
+```
+
+`Pairing: NotNeeded` means no credentials, which is why this config holds no
+secrets and is tracked.
+
+**If the voice sounds mechanical**, that is macOS's Compact voice, not this code.
+System Settings → Accessibility → Spoken Content → System Voice → Manage Voices →
+download `Ava (Premium)` or `Zoe (Premium)`, then set `"voice": "Ava (Premium)"`.
+`"rate": 165` (words per minute) also helps — room reverb smears fast speech.
+
+### The recordings
+
+Each request writes a WAV under **`audio/`**, named so it sorts chronologically:
+
+```text
+audio/speak_20260830_233054_291_Alex.wav
+audio/speak_20260830_233055_650_娜.wav
+```
+
+They are **kept**, so you can hear what the house actually said. The log names the
+file, so a line and its recording can be matched up:
+
+```text
+AIRPLAY SPEAK by Alex on 10.0.0.155 at 40% -> success [speak_20260830_233054_291_Alex.wav]
+"Dinner is ready"
+```
+
+`audio/` is gitignored, created on demand, and about 88 KB per second of speech.
+
+### Purging recordings
+
+They accumulate, so trim them like a location history:
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/purge \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"records": 5}'
+```
+
+```json
+{"status": "ok", "records": 5, "removed": 4, "kept": 5,
+ "message": "Purged 4 recordings beyond the 5 most recent; 5 kept."}
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `records` (or `keep`) | no | How many of the newest to keep; default 20. `0` removes them all |
+
+- **Newest is by modification time**, not filename, so a renamed file still orders
+  correctly.
+- **Only `speak_*.wav` is ever considered.** Anything else in `audio/` is left
+  alone, so a mis-set directory cannot delete your files.
+- A file that will not delete is counted in `failed` and reported; the rest still
+  go.
+
+### Switches
+
+Gated by its job switch alone — there is deliberately **no** entry in
+`home_assistant_switches.json`, because this path never touches Home Assistant:
+
+```bash
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/jobs/airplay_speak/disable
+```
+
 ## Switches
 
 Features are partitioned by switch file, one file per level of the system:
@@ -1237,7 +1368,7 @@ caller:
 | `blink` | `set_alarm()` | `/webhook/blink/*` **and** the leaving/arriving webhooks |
 | `notify` | `notify_phone()` | the leaving/arriving, location, and arm/disarm notifications |
 | `lutron` | the `jobs.home_assistant_lutron` handlers | `/webhook/lutron/*` |
-| `speak` | `jobs.home_assistant_speak` | `/webhook/speak` |
+| `speak` | `jobs.home_assistant_speak` | `/webhook/speak/ha` |
 
 A feature that is off makes the call a no-op reporting `"skipped"` — no HTTP
 request, and `home_assistant_config.json` is not even read, so a feature can be
@@ -1382,7 +1513,8 @@ python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
 python3 tests/test_lutron.py                # Lutron light/scene job + shared HA API caller
-python3 tests/test_speak.py                 # text-to-speech job tests
+python3 tests/test_speak.py                 # text-to-speech via Home Assistant
+python3 tests/test_airplay_speak.py         # text-to-speech via AirPlay, and audio purge
 python3 tests/test_notify_phone.py          # phone notification job tests (incl. per-home text)
 python3 tests/test_presence_webhook.py      # presence read/write webhook tests (incl. multi-home)
 python3 tests/test_location.py              # location log/fetch/history/purge + notify tests

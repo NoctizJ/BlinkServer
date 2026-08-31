@@ -1,2 +1,4 @@
 Flask>=3.0
 requests>=2.31
+# Only needed by jobs/airplay_speak.py (direct AirPlay TTS).
+pyatv>=0.14

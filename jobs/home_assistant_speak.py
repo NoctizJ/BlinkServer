@@ -3,7 +3,10 @@
 
 One webhook (see config.json):
 
-  - speak(payload) -> POST /webhook/speak
+  - speak(payload) -> POST /webhook/speak/ha
+
+The ``/ha`` suffix distinguishes this from :mod:`jobs.airplay_speak`, which says
+the same thing straight to an AirPlay speaker without Home Assistant in the way.
 
 Home Assistant's ``tts.speak`` service takes the **TTS provider** as its target
 entity and the speaker separately, which is easy to get backwards::
@@ -51,7 +54,9 @@ Switches
 Gated by two switches, like the other Home Assistant jobs:
 
   * the ``speak`` feature in ``configs/home_assistant_switches.json``, checked
-    here, which turns text-to-speech off entirely;
+    here, which turns text-to-speech off entirely. **It ships off**, because
+    Home Assistant cannot currently discover the HomePod; enable it with
+    ``POST /ha/speak/enable`` once it can;
   * the ``home_assistant_speak`` job in ``configs/job_switches.json``, checked by
     the webhook dispatcher, which stops the path responding at all.
 
@@ -174,7 +179,7 @@ def resolve_speaker(name: Optional[str]) -> Optional[str]:
 
 
 def speak(payload: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Webhook handler for POST /webhook/speak.
+    """Webhook handler for POST /webhook/speak/ha.
 
     Says ``message`` on a Home Assistant media player through the configured TTS
     provider. Fields: ``message`` (required), ``id`` (who asked; defaults to the

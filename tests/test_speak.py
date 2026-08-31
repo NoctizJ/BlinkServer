@@ -386,9 +386,12 @@ def test_speak_feature_switch():
 
     assert hs.SPEAK == "speak"
     assert hs.SPEAK in hs.FEATURES, hs.FEATURES
+    # Shipped OFF: Home Assistant cannot currently see the HomePod, so the
+    # feature stays disabled until that is fixed. The code and its tests remain,
+    # and one POST to /ha/speak/enable brings it back.
     shipped = json.loads(
         (Path(__file__).parent.parent / "configs" / "home_assistant_switches.json").read_text())
-    assert shipped["features"]["speak"] is True, shipped
+    assert shipped["features"]["speak"] is False, shipped
     print("  OK: a disabled speak feature says nothing")
 
 
@@ -397,8 +400,8 @@ def test_webhook_is_registered():
     print("Testing speak webhook registration...")
     config = json.loads((Path(__file__).parent.parent / "configs" / "config.json").read_text())
     hooks = {h["path"]: h for h in config["webhooks"]}
-    hook = hooks.get("/webhook/speak")
-    assert hook, "/webhook/speak not registered in configs/config.json"
+    hook = hooks.get("/webhook/speak/ha")
+    assert hook, "/webhook/speak/ha not registered in configs/config.json"
     assert hook["module"] == "jobs.home_assistant_speak", hook
     assert hook["function"] == "speak", hook
     assert hook["require_secret"] is True, hook
@@ -412,7 +415,7 @@ def test_webhook_is_registered():
         (Path(__file__).parent.parent / "configs" / "home_assistant_entities.json").read_text())
     assert "speak" in entities, entities
     assert set(entities["speak"]) == {"tts", "speakers"}, entities["speak"]
-    print("  OK: /webhook/speak registered, secret required, config in place")
+    print("  OK: /webhook/speak/ha registered, secret required, config in place")
 
 
 if __name__ == "__main__":
