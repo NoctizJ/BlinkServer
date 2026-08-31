@@ -95,6 +95,12 @@
       "module": "jobs.home_assistant_lutron",
       "function": "sos",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/lutron/status",
+      "module": "jobs.home_assistant_lutron",
+      "function": "status",
+      "require_secret": true
     }
   ]
 }

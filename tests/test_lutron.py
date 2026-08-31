@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import jobs.home_assistant_api as ha_api
+from jobs.text_format import display_width
 import jobs.home_assistant_entities as he
 import jobs.home_assistant_switches as hs
 import jobs.home_assistant_lutron as lu
@@ -27,6 +28,16 @@ FAKE_HA_CONFIG = {
     "HA_BASE_URL": "http://host:8123",
     "HA_API_KEY": "test-token",
 }
+
+# What Home Assistant reports for the aliased entities. "bogus"/"scene.*" are
+# deliberately absent so the status report has a stale alias to surface.
+STATE_LIST = [
+    {"entity_id": "light.kitchen_main", "state": "on",
+     "attributes": {"brightness": 255, "friendly_name": "Kitchen Main"}},
+    {"entity_id": "switch.hallway_lights", "state": "off",
+     "attributes": {"friendly_name": "Hallway Lights"}},
+    {"entity_id": "light.unrelated", "state": "on", "attributes": {}},
+]
 
 ENTITIES = {
     "lutron": {
@@ -61,7 +72,10 @@ class lutron_env:
             json.dumps(self._entities), encoding="utf-8")
 
         self.post = mock.Mock(return_value=mock.Mock(status_code=self._status, text="{}"))
+        self.get = mock.Mock(return_value=mock.Mock(
+            status_code=200, text="[]", json=lambda: list(STATE_LIST)))
         self._patches = [
+            mock.patch.object(ha_api.requests, "get", self.get),
             mock.patch.object(he, "CONFIG_FILE", str(directory / "home_assistant_entities.json")),
             mock.patch.object(hs, "SWITCH_FILE", directory / "home_assistant_switches.json"),
             mock.patch.object(ha_api, "load_connection", return_value=FAKE_HA_CONFIG),
@@ -512,6 +526,126 @@ def test_sos_feature_switch():
     print("  OK: a disabled lutron feature blinks nothing")
 
 
+def test_status_reports_every_configured_light():
+    """status() pairs each alias with what Home Assistant says about it."""
+    print("Testing the lutron status report...")
+    with lutron_env() as post:
+        res = lu.status({})
+        assert res["status"] == "ok", res
+        assert res["count"] == 3, res              # kitchen, hallway, bogus
+        assert res["on"] == ["kitchen"], res
+        assert res["off"] == ["hallway"], res
+        assert res["other"] == ["bogus"], res      # aliased to an entity HA lacks
+
+        kitchen = res["lights"]["kitchen"]
+        assert kitchen["entity_id"] == "light.kitchen_main", kitchen
+        assert kitchen["state"] == "on" and kitchen["brightness"] == "100%", kitchen
+        assert kitchen["name"] == "Kitchen Main", kitchen
+
+        # A switch has no brightness attribute at all.
+        assert res["lights"]["hallway"]["brightness"] == "-", res["lights"]["hallway"]
+
+        # A stale alias is reported, not silently dropped.
+        assert res["lights"]["bogus"]["state"] == "missing", res["lights"]["bogus"]
+
+        # Reading status must never change anything.
+        assert post.call_count == 0, "status made a service call"
+    print("  OK: state, brightness and name reported per alias")
+
+
+def test_status_reads_all_states_in_one_request():
+    """However many lights are configured, it is one GET."""
+    print("Testing the status request count...")
+    with lutron_env() as post:
+        env_get = lu.get_states
+        with mock.patch.object(ha_api.requests, "get",
+                               return_value=mock.Mock(status_code=200, text="[]",
+                                                      json=lambda: list(STATE_LIST))) as get:
+            lu.status({})
+            assert get.call_count == 1, get.call_count
+            assert get.call_args.args[0].endswith("/api/states"), get.call_args.args[0]
+    print("  OK: a single GET /api/states covers every light")
+
+
+def test_status_message_is_displayable():
+    """The report reads like the presence summary, and aligns wide characters."""
+    print("Testing the status text report...")
+    wide = {"lutron": {"lights": {"kitchen": "light.kitchen_main",
+                                  "娜の部屋": "light.nas_room"}}}
+    states = STATE_LIST + [{"entity_id": "light.nas_room", "state": "unavailable",
+                            "attributes": {"friendly_name": "娜の部屋"}}]
+    with lutron_env(entities=wide) as post:
+        with mock.patch.object(ha_api.requests, "get",
+                               return_value=mock.Mock(status_code=200, text="[]",
+                                                      json=lambda: states)):
+            message = lu.status({})["message"]
+    print("\n" + message + "\n")
+    lines = message.splitlines()
+    assert lines[0] == "Lutron lights — 2 lights", lines[0]
+    assert set("-") == set(lines[1]), lines[1]
+    assert lines[2] == "On (1): kitchen", lines[2]
+    assert lines[3] == "Off (0): -", lines[3]
+    assert lines[4].startswith("Missing/unavailable (1): 娜の部屋"), lines[4]
+    assert lines[5] == "", lines
+    # The rule spans the widest line, counting 娜 as two columns.
+    assert len(lines[1]) == max(display_width(line) for line in lines), lines[1]
+
+    # A healthy report stays two summary lines - no Missing line at all.
+    healthy = lu.format_lights([
+        {"alias": "kitchen", "entity_id": "light.k", "state": "on",
+         "brightness": "100%", "name": "K"},
+    ])
+    assert "Missing" not in healthy, healthy
+    assert healthy.startswith("Lutron lights — 1 light"), healthy   # singular
+    print("  OK: header, on/off lists, aligned rows, no Missing line when healthy")
+
+
+def test_status_with_no_aliases_or_no_home_assistant():
+    """No aliases reads as empty; an unreachable Home Assistant is an error."""
+    print("Testing status edge cases...")
+    with lutron_env(entities={"lutron": {"lights": {}}}):
+        res = lu.status({})
+        assert res["status"] == "ok" and res["count"] == 0, res
+        assert res["lights"] == {} and res["on"] == [], res
+        assert res["message"] == "Lutron lights — none configured.", res["message"]
+        assert lu.format_lights([]) == "Lutron lights — none configured."
+
+    # An unreadable Home Assistant is reported, not raised.
+    with lutron_env():
+        with mock.patch.object(lu, "get_states", return_value=None):
+            res = lu.status({})
+            assert res["error"] == "Home Assistant unreachable", res
+
+        with mock.patch.object(lu, "get_states",
+                               side_effect=ValueError("Configuration file not found")):
+            res = lu.status({})
+            assert res["error"] == "Lutron status failed", res
+            assert "Configuration file not found" in res["message"], res
+
+    # A non-200 or unparseable body yields None from the reader itself.
+    with lutron_env() as post:
+        for response in (mock.Mock(status_code=500, text="boom"),
+                         mock.Mock(status_code=200, text="nope",
+                                   json=mock.Mock(side_effect=ValueError("bad"))),
+                         mock.Mock(status_code=200, text="{}", json=lambda: {"not": "a list"})):
+            with mock.patch.object(ha_api.requests, "get", return_value=response):
+                assert lu.status({})["error"] == "Home Assistant unreachable"
+    print("  OK: empty, unreachable, and malformed responses all handled")
+
+
+def test_status_feature_switch():
+    """The lutron feature switch stops the status read too."""
+    print("Testing the status feature switch...")
+    with lutron_env():
+        hs.set_enabled_for(hs.LUTRON, False)
+        res = lu.status({})
+        assert res["status"] == "skipped", res
+        assert "lutron" in res["message"], res
+        hs.set_enabled_for(hs.LUTRON, True)
+        assert lu.status({})["status"] == "ok"
+    print("  OK: a disabled lutron feature reports nothing")
+
+
 def test_webhooks_are_registered():
     """config.json wires both handlers up as secret-protected webhooks."""
     print("Testing lutron webhook registration...")
@@ -519,7 +653,8 @@ def test_webhooks_are_registered():
     hooks = {h["path"]: h for h in config["webhooks"]}
     for path, function in (("/webhook/lutron/light", "light"),
                            ("/webhook/lutron/scene", "scene"),
-                           ("/webhook/lutron/sos", "sos")):
+                           ("/webhook/lutron/sos", "sos"),
+                           ("/webhook/lutron/status", "status")):
         hook = hooks.get(path)
         assert hook, f"{path} not registered in configs/config.json"
         assert hook["module"] == "jobs.home_assistant_lutron", hook
@@ -590,6 +725,11 @@ if __name__ == "__main__":
     test_sos_releases_the_guard_when_a_thread_dies()
     test_sos_validation()
     test_sos_feature_switch()
+    test_status_reports_every_configured_light()
+    test_status_reads_all_states_in_one_request()
+    test_status_message_is_displayable()
+    test_status_with_no_aliases_or_no_home_assistant()
+    test_status_feature_switch()
     test_webhooks_are_registered()
     test_shared_api_caller()
     print("\nAll Lutron tests passed!")

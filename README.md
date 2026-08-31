@@ -18,6 +18,8 @@ server code.
   percentage, and scene activation, with friendly aliases — see [Lutron](#lutron)
 - **SOS** blinker for any Lutron light or switch — on/off in real seconds, run in
   the background, always ending off — see [SOS](#sos)
+- Lutron **light status report** as a plain text table, read in one request —
+  see [Light status](#light-status)
 - Home Assistant integration switchable by feature — turn the alarm panel, the phone
   notifications, or Lutron off entirely without touching config — see [Switches](#switches)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
@@ -380,6 +382,7 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | GET    | `/location/history`           | Read a person's location history as text; `?id=`, `?n=` 🔒 |
 | POST   | `/webhook/lutron/light`       | Turn a Lutron light on/off/toggle, set brightness % (see [Lutron](#lutron)) 🔒 |
 | POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
+| POST   | `/webhook/lutron/status`      | Report every configured light's state as text (see [Light status](#light-status)) 🔒 |
 | POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
@@ -898,6 +901,57 @@ curl -X POST http://localhost:5050/webhook/lutron/scene \
 **Home Assistant scenes cannot be turned off or toggled** — activating is the only
 thing a scene does. To undo one, activate another (a `goodnight` scene beside a
 `movie` scene). A `state` field on a scene request is ignored rather than an error.
+
+### Light status
+
+Report what Home Assistant currently says about every light in your `lutron`
+aliases — state, brightness and friendly name — as a text table, the way
+`GET /presence` reports people.
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/status \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" -d '{}'
+```
+
+```text
+Lutron lights — 4 lights
+---------------------------------------------------------------------
+On (2): kitchen, living
+Off (1): hallway
+Missing/unavailable (1): porch
+
+hallway   off             -  switch.hallway_lights     Hallway Lights
+kitchen   on           100%  light.kitchen_main        Kitchen Main
+living    on            40%  light.living_room_dimmer  Living Room
+porch     missing         -  light.porch_old
+```
+
+It takes no fields. Alongside `message` (the table above) the result carries the
+structured form, like the presence read:
+
+```json
+{"status": "ok", "count": 4,
+ "on": ["kitchen", "living"], "off": ["hallway"], "other": ["porch"],
+ "lights": {
+   "living": {"entity_id": "light.living_room_dimmer", "state": "on",
+              "brightness": "40%", "name": "Living Room"}
+ },
+ "message": "Lutron lights — 4 lights\n…"}
+```
+
+Notes:
+
+- **One request, however many lights.** Every alias is resolved from a single
+  `GET /api/states`, so the cost does not grow with your alias list.
+- **A stale alias shows up as `missing`** rather than being dropped — if you
+  renamed or recreated something in the Lutron app, this is where you will see it.
+  `unavailable` means Home Assistant knows the entity but cannot reach the device.
+- **Brightness is a percentage**, converted from the 0-255 Home Assistant reports.
+  Switches have no brightness and show `-`.
+- The `Missing/unavailable` line only appears when something is wrong, so a healthy
+  report is two summary lines.
+- Read-only: it never calls a service, so it cannot change a light.
 
 ### SOS
 

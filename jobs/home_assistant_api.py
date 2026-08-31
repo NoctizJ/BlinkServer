@@ -131,7 +131,56 @@ def call_service(
     }
 
 
+def get_states() -> Optional[Dict[str, Dict[str, Any]]]:
+    """Return every Home Assistant entity's state, keyed by entity id.
+
+    Reads ``GET /api/states`` once — one round trip however many entities you
+    care about, rather than one per entity. Each value looks like::
+
+        {"state": "on", "attributes": {"brightness": 102, ...}, ...}
+
+    Every failure — unreachable, non-200, unparseable body — is logged and
+    returns ``None`` rather than raising, so a caller can report "could not read
+    Home Assistant" instead of dying.
+
+    Raises:
+        ValueError: the Home Assistant configuration is missing or incomplete.
+    """
+    config = load_connection()
+    base_url = config["HA_BASE_URL"].rstrip("/")
+    endpoint = f"{base_url}/api/states"
+    headers = {"Authorization": f"Bearer {config['HA_API_KEY']}"}
+
+    try:
+        response = requests.get(endpoint, headers=headers, timeout=30)
+    except requests.RequestException as e:
+        logger.error("could not read entity states: %s", e)
+        return None
+
+    if response.status_code != 200:
+        logger.error("reading states returned HTTP %d: %s",
+                     response.status_code, response.text)
+        return None
+
+    try:
+        states = response.json()
+    except ValueError as e:
+        logger.error("unparseable state list: %s", e)
+        return None
+
+    if not isinstance(states, list):
+        logger.error("expected a list of states, got %s", type(states).__name__)
+        return None
+    return {
+        entry["entity_id"]: entry
+        for entry in states
+        if isinstance(entry, dict) and isinstance(entry.get("entity_id"), str)
+    }
+
+
 if __name__ == "__main__":
     # Manual smoke test — requires a valid home_assistant_config.json.
     print("connection ->", {k: "…" if "KEY" in k else v for k, v in load_connection().items()})
     print("call       ->", call_service("light", "turn_on", {"entity_id": "light.nonexistent"}))
+    states = get_states()
+    print("states     ->", f"{len(states)} entities" if states else "unavailable")

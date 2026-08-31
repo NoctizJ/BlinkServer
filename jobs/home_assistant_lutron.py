@@ -50,6 +50,10 @@ It returns as soon as the blinking has started; the alternation runs on a
 background thread. Lutron hardware needs real time to switch, so the interval is
 in whole seconds rather than the milliseconds a Morse pattern would want.
 
+``status`` reports what Home Assistant currently says about every configured
+light — state, brightness and friendly name — as a text table like the presence
+summary. It takes no fields.
+
 ``scene`` activates a scene, with an optional ``transition``::
 
     {"scene": "movie"}
@@ -78,19 +82,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     # Normal import path when loaded as part of the jobs package.
-    from jobs.home_assistant_api import call_service
+    from jobs.home_assistant_api import call_service, get_states
     from jobs.home_assistant_entities import aliases as ha_aliases
     from jobs.home_assistant_switches import LUTRON as HA_LUTRON_FEATURE
     from jobs.home_assistant_switches import enabled_for as ha_feature_enabled
     from jobs.home_assistant_switches import skipped as ha_feature_skipped
     from jobs.log_engine import log as write_log
+    from jobs.text_format import display_width, pad, rule
 except ImportError:  # pragma: no cover - allows running this file directly
-    from home_assistant_api import call_service
+    from home_assistant_api import call_service, get_states
     from home_assistant_entities import aliases as ha_aliases
     from home_assistant_switches import LUTRON as HA_LUTRON_FEATURE
     from home_assistant_switches import enabled_for as ha_feature_enabled
     from home_assistant_switches import skipped as ha_feature_skipped
     from log_engine import log as write_log
+    from text_format import display_width, pad, rule
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +538,165 @@ def sos(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     }
 
 
+
+# States Home Assistant reports that mean "I could not reach this device".
+UNREACHABLE_STATES = ("unavailable", "unknown")
+
+# Shown in the brightness column for anything without a readable level.
+NO_BRIGHTNESS = "-"
+
+
+def _brightness_of(entry: Dict[str, Any]) -> str:
+    """Render an entity's brightness as a percentage, or ``"-"``.
+
+    Home Assistant reports ``brightness`` as 0-255; switches have none at all.
+    """
+    brightness = (entry.get("attributes") or {}).get("brightness")
+    if not isinstance(brightness, (int, float)):
+        return NO_BRIGHTNESS
+    return f"{round(brightness / 255 * 100)}%"
+
+
+def _light_rows(states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pair every configured light alias with what Home Assistant says about it.
+
+    An alias pointing at an entity Home Assistant does not know is reported as
+    ``"missing"`` rather than dropped — a stale alias is the thing you most want
+    this report to show you.
+    """
+    rows = []
+    for alias, entity_id in sorted(all_aliases(LIGHTS_SECTION).items()):
+        entry = states.get(entity_id)
+        if entry is None:
+            rows.append({
+                "alias": alias,
+                "entity_id": entity_id,
+                "state": "missing",
+                "brightness": NO_BRIGHTNESS,
+                "name": "",
+            })
+            continue
+        rows.append({
+            "alias": alias,
+            "entity_id": entity_id,
+            "state": str(entry.get("state") or "unknown"),
+            "brightness": _brightness_of(entry),
+            "name": str((entry.get("attributes") or {}).get("friendly_name") or ""),
+        })
+    return rows
+
+
+def format_lights(rows: List[Dict[str, Any]]) -> str:
+    """Render the light rows as a plain text report.
+
+    Laid out like the presence summary: a count, a rule, the on/off name lists,
+    then one aligned row per light::
+
+        Lutron lights — 4 lights
+        ---------------------------------------------------------------------
+        On (2): kitchen, living
+        Off (1): hallway
+        Missing (1): porch
+
+        hallway  off      -  switch.hallway_lights     Hallway Lights
+        kitchen  on    100%  light.kitchen_main        Kitchen Main
+        living   on     40%  light.living_room_dimmer  Living Room
+        porch    missing  -  light.porch_old
+    """
+    if not rows:
+        return "Lutron lights — none configured."
+
+    on = sorted(r["alias"] for r in rows if r["state"] == "on")
+    off = sorted(r["alias"] for r in rows if r["state"] == "off")
+    other = sorted(r["alias"] for r in rows if r["state"] not in ("on", "off"))
+
+    alias_width = max(display_width(r["alias"]) for r in rows)
+    state_width = max(display_width(r["state"]) for r in rows)
+    bright_width = max(display_width(r["brightness"]) for r in rows)
+    entity_width = max(display_width(r["entity_id"]) for r in rows)
+
+    body_rows = [
+        f"{pad(r['alias'], alias_width)}  {pad(r['state'], state_width)}  "
+        f"{' ' * (bright_width - display_width(r['brightness']))}{r['brightness']}  "
+        f"{pad(r['entity_id'], entity_width)}  {r['name']}".rstrip()
+        for r in rows
+    ]
+
+    count = len(rows)
+    header = f"Lutron lights — {count} {'light' if count == 1 else 'lights'}"
+    summary = [f"On ({len(on)}): {', '.join(on) or NO_BRIGHTNESS}",
+               f"Off ({len(off)}): {', '.join(off) or NO_BRIGHTNESS}"]
+    if other:
+        # Only shown when something is unreachable or stale, so a healthy report
+        # stays two lines.
+        summary.append(f"Missing/unavailable ({len(other)}): {', '.join(other)}")
+
+    return "\n".join(
+        [header, rule([header] + summary + body_rows)] + summary + [""] + body_rows)
+
+
+def status(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/lutron/status.
+
+    Reports what Home Assistant currently says about every light aliased in the
+    ``lutron`` section of home_assistant_entities.json — its state, its
+    brightness, and its friendly name — as both structured fields and a
+    ready-to-display ``message``, the way the presence read does.
+
+    Every configured alias is read in a single ``GET /api/states``, so the cost
+    does not grow with the number of lights. An alias whose entity Home Assistant
+    does not know is reported as ``"missing"`` rather than omitted.
+    """
+    logger.debug("lutron status payload: %s", payload)
+
+    if not ha_feature_enabled(HA_LUTRON_FEATURE):
+        return ha_feature_skipped(HA_LUTRON_FEATURE)
+
+    aliases = all_aliases(LIGHTS_SECTION)
+    if not aliases:
+        return {
+            "status": "ok",
+            "count": 0,
+            "on": [],
+            "off": [],
+            "other": [],
+            "lights": {},
+            "message": format_lights([]),
+        }
+
+    try:
+        states = get_states()
+    except Exception as e:  # missing/invalid home_assistant_config.json
+        error_msg = str(e)
+        logger.error("lutron status failed: %s", error_msg)
+        return _error("Lutron status failed", error_msg)
+
+    if states is None:
+        return _error(
+            "Home Assistant unreachable",
+            "could not read entity states from Home Assistant",
+        )
+
+    rows = _light_rows(states)
+    return {
+        "status": "ok",
+        "count": len(rows),
+        "on": sorted(r["alias"] for r in rows if r["state"] == "on"),
+        "off": sorted(r["alias"] for r in rows if r["state"] == "off"),
+        "other": sorted(r["alias"] for r in rows if r["state"] not in ("on", "off")),
+        "lights": {
+            r["alias"]: {
+                "entity_id": r["entity_id"],
+                "state": r["state"],
+                "brightness": r["brightness"],
+                "name": r["name"],
+            }
+            for r in rows
+        },
+        "message": format_lights(rows),
+    }
+
+
 if __name__ == "__main__":
     # Simple smoke test / demo — reaches Home Assistant only if configured.
     print("light aliases ->", all_aliases(LIGHTS_SECTION))
@@ -546,3 +711,5 @@ if __name__ == "__main__":
     print("sos no name   ->", sos({}))
     print("sos bad dur   ->", sos({"light": "light.x", "duration": 9999}))
     print("sos steps     ->", _blink_steps(SOS_DEFAULT_DURATION, SOS_DEFAULT_INTERVAL))
+    print("\nstatus report:\n")
+    print(status({}).get("message"))
