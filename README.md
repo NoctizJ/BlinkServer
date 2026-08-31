@@ -962,7 +962,7 @@ curl -X POST http://localhost:5050/webhook/lutron/sos \
 
 ```json
 {"status": "started", "entity_id": "light.kitchen_main", "duration": 10.0,
- "interval": 2.0, "calls": 6, "estimated_seconds": 10.0,
+ "interval": 2.0, "brightness": 35.0, "calls": 6, "estimated_seconds": 10.0,
  "message": "Blinking light.kitchen_main for 10s every 2s, ending off"}
 ```
 
@@ -971,6 +971,7 @@ curl -X POST http://localhost:5050/webhook/lutron/sos \
 | `light` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
 | `duration` | no | Total seconds to blink for; default 10, range 2-300 |
 | `interval` | no | Seconds per on and per off; default 2, range 1-60 |
+| `brightness` | no | Level for each on-step, as a percentage; default 35, range 1-100. Lights only |
 
 The default is 10 seconds alternating every 2 seconds — three on, three off:
 
@@ -982,9 +983,18 @@ ON  off ON  off ON  off
 **Why seconds and not milliseconds.** Lutron hardware needs real time to switch.
 A sub-second blink is either invisible or arrives as a dim flicker, so the
 interval is in whole seconds and there is no Morse-code timing to get wrong.
-Every step still sends `transition: 0` so a dimmer's fade does not soften the
-edge, and `switch.*` entities — which snap, and take no `transition` — make the
-crispest target.
+
+**Each on-step sends an explicit `brightness_pct`.** Without one, the integration
+chooses the level itself — and some restore whatever the light was last set to, so
+a dimmer left at 5% would blink almost invisibly. Sending it makes the signal the
+same every time. `switch.*` entities have no level, so a `brightness` sent to one
+is an error rather than a silently dropped field.
+
+Every step also sends `transition: 0`, intended to stop a dimmer's fade softening
+the edge. Whether that has any effect depends on the entity declaring
+`LightEntityFeature.TRANSITION` — check with
+`supported_features & 32` on your own lights; if it is not set, Home Assistant
+silently ignores the field and the blink is unaffected either way.
 
 **It returns immediately.** The blinking runs on a background thread, because
 holding the request open for 10-300 s would time out an iPhone Shortcut. The
@@ -1000,6 +1010,8 @@ Notes and limits:
 - **Ends off, always.** If the last period was an on, a closing off is appended.
   The previous state is not read or restored — the light is dark afterwards even
   if it was on before.
+- **`brightness: 0` is rejected**, since it would blink the light at nothing while
+  reporting success.
 - **One SOS per entity at a time.** A second request while one is blinking returns
   `Already running`. A different entity is unaffected, and the guard is released
   even if the thread crashes.

@@ -403,8 +403,13 @@ def test_sos_blinks_in_real_seconds():
 
         # Dimmers soften an edge, so every step asks for an instant change.
         assert all(c.kwargs["json"].get("transition") == 0 for c in post.call_args_list)
-        # Nothing reads or restores the previous state any more.
-        assert not any("brightness_pct" in c.kwargs["json"] for c in post.call_args_list)
+        # Each on-step drives a deterministic level; the off-steps carry none.
+        on_steps = [c for c in post.call_args_list if c.args[0].endswith("turn_on")]
+        off_steps = [c for c in post.call_args_list if c.args[0].endswith("turn_off")]
+        assert all(c.kwargs["json"]["brightness_pct"] == lu.SOS_DEFAULT_BRIGHTNESS
+                   for c in on_steps), on_steps[0].kwargs["json"]
+        assert not any("brightness_pct" in c.kwargs["json"] for c in off_steps)
+        assert res["brightness"] == lu.SOS_DEFAULT_BRIGHTNESS == 35.0, res
     print("  OK: 6 calls, alternating, ending off")
 
 
@@ -420,6 +425,45 @@ def test_sos_honours_duration_and_interval():
             assert post.call_count == calls, (duration, interval, post.call_count)
             assert post.call_args_list[-1].args[0].endswith("/light/turn_off")
     print("  OK: call count follows duration/interval, always ending off")
+
+
+def test_sos_brightness():
+    """Each on-step drives an explicit level, defaulting to 35%."""
+    print("Testing SOS brightness...")
+    with lutron_env() as post, mock.patch.object(lu.time, "sleep"):
+        # Explicit brightness is used for every on-step.
+        res = lu.sos({"light": "kitchen", "duration": 4, "interval": 2, "brightness": 100})
+        assert res["brightness"] == 100.0, res
+        assert _drain_sos("light.kitchen_main")
+        on_steps = [c for c in post.call_args_list if c.args[0].endswith("turn_on")]
+        assert on_steps and all(c.kwargs["json"]["brightness_pct"] == 100.0
+                                for c in on_steps), on_steps[0].kwargs["json"]
+
+        # A switch has no level: a defaulted brightness is simply not sent...
+        post.reset_mock()
+        res = lu.sos({"light": "hallway", "duration": 4, "interval": 2})
+        assert res["brightness"] is None, res
+        assert _drain_sos("switch.hallway_lights")
+        assert not any("brightness_pct" in c.kwargs["json"] for c in post.call_args_list)
+
+        # ...but an explicit one is a request we cannot honour, so it is an error.
+        post.reset_mock()
+        res = lu.sos({"light": "hallway", "brightness": 50})
+        assert res["error"] == "Not dimmable", res
+        assert post.call_count == 0
+
+        # 0 would blink the light at nothing - a silent no-op, so reject it.
+        res = lu.sos({"light": "kitchen", "brightness": 0})
+        assert res["error"] == "Invalid brightness", res
+        assert "nothing" in res["message"], res
+
+        for value in (-1, 101, "bright", None):
+            res = lu.sos({"light": "kitchen", "brightness": value})
+            assert res["error"] == "Invalid brightness", (value, res)
+
+        with lu._running_lock:
+            assert not lu._running, lu._running
+    print("  OK: 35% default, explicit level honoured, switches and 0 rejected")
 
 
 def test_sos_on_a_switch_sends_no_transition():
@@ -739,6 +783,7 @@ if __name__ == "__main__":
     test_sos_alternates_and_ends_off()
     test_sos_blinks_in_real_seconds()
     test_sos_honours_duration_and_interval()
+    test_sos_brightness()
     test_sos_on_a_switch_sends_no_transition()
     test_sos_one_at_a_time_per_entity()
     test_sos_releases_the_guard_when_a_thread_dies()

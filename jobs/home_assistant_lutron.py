@@ -42,9 +42,10 @@ Usage
 
 ``sos`` blinks an entity on and off as an attention signal, ending off::
 
-    {"light": "kitchen"}                            # 10s, on/off every 2s
+    {"light": "kitchen"}                            # 10s, on/off every 2s, 35%
     {"light": "kitchen", "duration": 30}
     {"light": "kitchen", "duration": 20, "interval": 4}
+    {"light": "kitchen", "brightness": 100}         # a brighter signal
 
 It returns as soon as the blinking has started; the alternation runs on a
 background thread. Lutron hardware needs real time to switch, so the interval is
@@ -135,6 +136,12 @@ DEFAULT_STATE = "on"
 SOS_DEFAULT_DURATION = 10.0
 SOS_MIN_DURATION = 2.0
 SOS_MAX_DURATION = 300.0
+
+# The level each on-step drives a dimmer to. Without an explicit brightness the
+# integration picks the level itself — some restore the last one used, so a light
+# last left at 5% would blink almost invisibly. Sending it makes the signal
+# deterministic.
+SOS_DEFAULT_BRIGHTNESS = 35.0
 
 SOS_DEFAULT_INTERVAL = 2.0
 SOS_MIN_INTERVAL = 1.0
@@ -411,7 +418,13 @@ def _blink_steps(duration: float, interval: float) -> List[Tuple[bool, float]]:
     return steps
 
 
-def _run_sos(entity_id: str, domain: str, duration: float, interval: float) -> None:
+def _run_sos(
+    entity_id: str,
+    domain: str,
+    duration: float,
+    interval: float,
+    brightness: float,
+) -> None:
     """Blink an entity on and off, ending off. Runs on a background thread.
 
     Each step subtracts the time its own service call took from the wait, so a
@@ -427,6 +440,8 @@ def _run_sos(entity_id: str, domain: str, duration: float, interval: float) -> N
             data: Dict[str, Any] = {"entity_id": entity_id}
             if domain in DIMMABLE_DOMAINS:
                 data.update(INSTANT)
+                if on:
+                    data["brightness_pct"] = brightness
             result = call_service(domain, "turn_on" if on else "turn_off", data)
             if result.get("status") != "success":
                 failures += 1
@@ -454,7 +469,8 @@ def sos(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     would time out a Shortcut.
 
     Fields: ``light`` (alias or entity id), ``duration`` in seconds (default 10,
-    2-300), and ``interval`` in seconds (default 2, 1-60).
+    2-300), ``interval`` in seconds (default 2, 1-60), and ``brightness`` as a
+    percentage (default 35, 1-100; lights only — a switch has no level).
     """
     logger.debug("lutron sos payload: %s", payload)
 
@@ -504,6 +520,24 @@ def sos(payload: Dict[str, Any] = None) -> Dict[str, Any]:
             f"interval {interval:g}s is longer than the duration {duration:g}s",
         )
 
+    percent, error_msg = _brightness_pct(payload)
+    if error_msg:
+        return _error("Invalid brightness", error_msg)
+    if percent is not None and domain not in DIMMABLE_DOMAINS:
+        # Defaulted brightness is fine to ignore on a switch; an explicit one is a
+        # request we cannot honour, so say so rather than drop it.
+        return _error(
+            "Not dimmable",
+            f"{entity_id!r} is a '{domain}' entity and cannot be dimmed - "
+            f"drop 'brightness'",
+        )
+    if percent == 0:
+        return _error(
+            "Invalid brightness",
+            "brightness 0 would blink the light at nothing - use 1-100",
+        )
+    brightness = SOS_DEFAULT_BRIGHTNESS if percent is None else percent
+
     # One SOS at a time per entity, or two threads fight over the same light.
     with _running_lock:
         if entity_id in _running:
@@ -517,7 +551,7 @@ def sos(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     try:
         thread = threading.Thread(
             target=_run_sos,
-            args=(entity_id, domain, duration, interval),
+            args=(entity_id, domain, duration, interval, brightness),
             name=f"sos-{entity_id}",
             daemon=True,
         )
@@ -532,6 +566,7 @@ def sos(payload: Dict[str, Any] = None) -> Dict[str, Any]:
         "entity_id": entity_id,
         "duration": duration,
         "interval": interval,
+        "brightness": brightness if domain in DIMMABLE_DOMAINS else None,
         "calls": len(steps),
         "estimated_seconds": round(sum(seconds for _, seconds in steps), 1),
         "message": f"Blinking {entity_id} for {duration:g}s every {interval:g}s, ending off",
