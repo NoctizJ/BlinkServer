@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Text-to-speech straight to an AirPlay speaker, without Home Assistant.
 
-Two webhooks (see config.json):
+Three webhooks (see config.json):
 
-  - speak(payload) -> POST /webhook/speak/airplay
-  - purge(payload) -> POST /webhook/speak/purge
+  - speak(payload)  -> POST /webhook/speak/airplay
+  - upload(payload) -> POST /webhook/speak/upload
+  - purge(payload)  -> POST /webhook/speak/purge
 
 Home Assistant could not discover the HomePod, so this talks to it directly:
 macOS ``say`` renders the words to a WAV file, and pyatv streams that file to the
@@ -54,6 +55,13 @@ exactly one is configured — the same rule :mod:`jobs.home_assistant_speak` use
     {"message": "Welcome home", "speaker": "bedroom"}
     {"message": "Welcome home", "speaker": "10.0.0.155", "volume": 40}
 
+With ``file`` instead of ``message``, an existing recording from ``audio/`` is
+played as-is. Any playable file counts, not only this job's own output, so a
+``doorbell.wav`` dropped in there works — and purge leaves it alone::
+
+    {"file": "doorbell.wav"}
+    {"file": "speak_20260830_233054_291_Alex.wav", "volume": 60}
+
 No credentials are needed for a HomePod whose RAOP service reports
 ``Pairing: NotNeeded``, which is why this config holds no secrets and is tracked.
 
@@ -71,6 +79,7 @@ exactly like the Home Assistant speaker.
 import asyncio
 import datetime
 import ipaddress
+import mimetypes
 import json
 import logging
 import os
@@ -80,6 +89,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+from flask import request
 
 try:
     # Normal import path when loaded as part of the jobs package.
@@ -127,6 +138,16 @@ RATE_KEY = "rate"
 # same request.
 MESSAGE_KEYS = ("message", "text")
 SPEAKER_KEYS = ("speaker", "host")
+
+# Play an existing recording from audio/ instead of synthesizing one.
+FILE_KEYS = ("file", "filename")
+
+# The name to store an upload under (POST /webhook/speak/upload).
+NAME_KEYS = ("name", "as")
+
+# What pyatv can stream. Checked up front so an unplayable file is a clear error
+# rather than a failure inside the stream.
+PLAYABLE_SUFFIXES = (".wav", ".mp3", ".flac", ".ogg")
 
 # Same cap as the Home Assistant speaker. Also bounds how long a single stream
 # can hold the speaker: ~500 characters is well under a minute of speech.
@@ -197,6 +218,34 @@ def resolve_speaker(name: Optional[str]) -> Optional[str]:
     if _is_address(name):
         return name
     return speakers.get(name)
+
+
+def resolve_recording(name: str) -> Tuple[Optional[Path], Optional[str]]:
+    """Resolve a filename inside ``audio/``, or return an error text.
+
+    Only the *basename* is used, so a value like ``../../etc/passwd`` cannot walk
+    out of the directory — it becomes ``passwd``, which then has to exist in
+    ``audio/`` like anything else. Any playable file counts, not just this job's
+    own ``speak_*.wav``, so you can drop a ``doorbell.wav`` in there; purge leaves
+    those alone.
+    """
+    bare = Path(str(name)).name
+    if not bare or bare in (".", ".."):
+        return None, f"{name!r} is not a filename"
+
+    if Path(bare).suffix.lower() not in PLAYABLE_SUFFIXES:
+        return None, (f"{bare!r} is not a playable audio file "
+                      f"(expected one of: {', '.join(PLAYABLE_SUFFIXES)})")
+
+    target = AUDIO_DIR / bare
+    if not target.is_file():
+        available = sorted(f.name for f in AUDIO_DIR.glob("*")
+                           if f.is_file() and f.suffix.lower() in PLAYABLE_SUFFIXES)
+        listing = ", ".join(available[:5]) or "(none)"
+        more = f" (+{len(available) - 5} more)" if len(available) > 5 else ""
+        return None, (f"{bare!r} is not in {AUDIO_DIR.name}/. "
+                      f"Available: {listing}{more}")
+    return target, None
 
 
 def _first(payload: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[str]:
@@ -294,38 +343,46 @@ async def _stream(address: str, audio: Path, volume: Optional[float]) -> None:
 
 def _run_speak(
     address: str,
-    message: str,
+    message: Optional[str],
+    recording: Optional[Path],
     person: str,
     volume: Optional[float],
     voice: Optional[str],
     rate: Optional[Any],
 ) -> None:
-    """Synthesize, stream, log, and clean up. Runs on a background thread.
+    """Synthesize (or reuse) audio, stream it, and log. Runs on a thread.
+
+    With ``recording`` set, an existing file from ``audio/`` is played and left
+    exactly as it was — only a freshly synthesized file is this job's to manage.
 
     Nothing raises out of here — a thread that died silently would leave the
-    address stuck in ``_speaking`` and a temporary file on disk.
+    address stuck in ``_speaking``.
     """
-    audio = None
+    audio = recording
+    verb = "PLAY" if recording is not None else "SPEAK"
     try:
-        audio = _synthesize(message, person, voice, rate)
+        if audio is None:
+            audio = _synthesize(message, person, voice, rate)
         asyncio.run(asyncio.wait_for(_stream(address, audio, volume), STREAM_TIMEOUT))
+        # Playing a file logs the filename only; there are no words to quote.
         write_log(
             LOG_TYPE,
-            f"AIRPLAY SPEAK by {person} on {address}"
+            f"AIRPLAY {verb} by {person} on {address}"
             f"{f' at {volume:g}%' if volume is not None else ''}"
-            f" -> success [{audio.name}]\n"
-            f'"{message}"',
+            f" -> success [{audio.name}]"
+            + (f'\n"{message}"' if message is not None else ""),
         )
     except Exception as e:
-        logger.exception("airplay speak on %s failed", address)
+        logger.exception("airplay %s on %s failed", verb.lower(), address)
         write_log(
             LOG_TYPE,
-            f"AIRPLAY SPEAK by {person} on {address} ERROR: {e}"
-            f"{f' [{audio.name}]' if audio is not None else ''}\n"
-            f'"{message}"',
+            f"AIRPLAY {verb} by {person} on {address} ERROR: {e}"
+            f"{f' [{audio.name}]' if audio is not None else ''}"
+            + (f'\n"{message}"' if message is not None else ""),
         )
     finally:
-        # The recording is deliberately kept — purge trims it later.
+        # Nothing is deleted: a synthesized recording is kept for purge to trim,
+        # and a file that was handed to us was never ours to remove.
         with _speaking_lock:
             _speaking.discard(address)
 
@@ -334,9 +391,13 @@ def speak(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     """Webhook handler for POST /webhook/speak/airplay.
 
     Says ``message`` on an AirPlay speaker over RAOP, with no Home Assistant
-    involved. Fields: ``message`` (required), ``id`` (who asked; defaults to the
-    presence store's default person), ``speaker`` (alias or address, optional when
-    only one is configured), ``volume`` as a percentage 1-100, and ``voice``.
+    involved — or, given ``file`` instead, plays an existing recording from
+    ``audio/`` rather than synthesizing anything.
+
+    Fields: ``message`` **or** ``file`` (one, not both), ``id`` (who asked;
+    defaults to the presence store's default person), ``speaker`` (alias or
+    address, optional when only one is configured), ``volume`` as a percentage
+    1-100, and ``voice`` (synthesis only).
 
     Returns as soon as the speech has been *started* — synthesis and streaming run
     on a background thread, because a stream lasts as long as the audio does and
@@ -357,17 +418,34 @@ def speak(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     person = resolve_person(payload)
 
     message = _first(payload, MESSAGE_KEYS)
-    if not message:
+    filename = _first(payload, FILE_KEYS)
+
+    if message and filename:
+        # Genuinely ambiguous for something that plays out loud, so ask rather
+        # than silently pick one.
+        return _error(
+            "Conflicting request",
+            f"give either a message or a file, not both "
+            f"(got message and {filename!r})",
+        )
+    if not message and not filename:
         return _error(
             "Missing message",
             f"Payload must include a non-empty message in one of: "
-            f"{', '.join(MESSAGE_KEYS)}",
+            f"{', '.join(MESSAGE_KEYS)} - or a file from {AUDIO_DIR.name}/ in "
+            f"one of: {', '.join(FILE_KEYS)}",
         )
-    if len(message) > MAX_MESSAGE_LENGTH:
+    if message and len(message) > MAX_MESSAGE_LENGTH:
         return _error(
             "Message too long",
             f"message is {len(message)} characters, the limit is {MAX_MESSAGE_LENGTH}",
         )
+
+    recording = None
+    if filename:
+        recording, error_msg = resolve_recording(filename)
+        if error_msg:
+            return _error("Unknown file", error_msg)
 
     volume, error_msg = _volume(payload)
     if error_msg:
@@ -407,7 +485,7 @@ def speak(payload: Dict[str, Any] = None) -> Dict[str, Any]:
     try:
         thread = threading.Thread(
             target=_run_speak,
-            args=(address, message, person, volume, voice, rate),
+            args=(address, message, recording, person, volume, voice, rate),
             name=f"airplay-speak-{address}",
             daemon=True,
         )
@@ -417,15 +495,20 @@ def speak(payload: Dict[str, Any] = None) -> Dict[str, Any]:
             _speaking.discard(address)
         return _error("Could not start speaking", str(e))
 
-    return {
+    result = {
         "status": "started",
         "id": person,
         "speaker": address,
-        "spoken": message,
         "volume": volume,
-        "voice": voice,
-        "message": f"Speaking on {address}",
     }
+    if recording is not None:
+        result["played"] = recording.name
+        result["message"] = f"Playing {recording.name} on {address}"
+    else:
+        result["spoken"] = message
+        result["voice"] = voice
+        result["message"] = f"Speaking on {address}"
+    return result
 
 
 
@@ -504,6 +587,196 @@ def purge(payload: Dict[str, Any] = None) -> Dict[str, Any]:
         result["message"] += f" {len(failed)} could not be removed."
 
     write_log(LOG_TYPE, f"AIRPLAY PURGE: {result['message']}")
+    return result
+
+
+
+def _has_content(storage) -> bool:
+    """True if a file part carries any bytes (peeks without consuming it)."""
+    stream = storage.stream
+    position = stream.tell()
+    stream.seek(0, 2)
+    size = stream.tell()
+    stream.seek(position)
+    return size > 0
+
+
+def _upload_name(given: Optional[str], storage) -> Tuple[Optional[str], Optional[str]]:
+    """Decide what to store an upload as, or return an error text.
+
+    With no ``name``, a timestamp is used. Note the separators: ``/`` is a path
+    separator and ``:`` is awkward on several filesystems and in URLs, so
+    ``2026-08-31_16-30-11.wav`` stands in for a plain date-and-time.
+
+    The extension comes from the given name when it has a playable one, otherwise
+    from the uploaded file, otherwise from its MIME type.
+    """
+    # Work out the extension first, so a name given without one still gets one.
+    suffix = ""
+    if given:
+        candidate = Path(str(given)).suffix.lower()
+        if candidate in PLAYABLE_SUFFIXES:
+            suffix = candidate
+    if not suffix:
+        candidate = Path(storage.filename or "").suffix.lower()
+        if candidate in PLAYABLE_SUFFIXES:
+            suffix = candidate
+    if not suffix:
+        guessed = (mimetypes.guess_extension(storage.mimetype or "") or "").lower()
+        suffix = guessed if guessed in PLAYABLE_SUFFIXES else ""
+    if not suffix:
+        return None, (f"cannot tell what kind of audio this is - name it with one of: "
+                      f"{', '.join(PLAYABLE_SUFFIXES)}")
+
+    if given:
+        # Only the basename, so a name cannot place the file outside audio/.
+        stem = _safe(Path(str(given)).stem)
+    else:
+        stem = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # speak_ is this job's own prefix and the only thing purge deletes. Reserving
+    # it means an upload can never be trimmed away by POST /webhook/speak/purge.
+    if stem.lower().startswith(AUDIO_PREFIX.rstrip("_").lower()):
+        return None, (f"{stem!r} may not start with {AUDIO_PREFIX!r} - that prefix is "
+                      f"reserved for synthesized speech, which purge deletes")
+
+    return f"{stem}{suffix}", None
+
+
+def upload(payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Webhook handler for POST /webhook/speak/upload.
+
+    Stores an uploaded audio file in ``audio/`` and then plays it on an AirPlay
+    speaker. Send ``multipart/form-data`` with one file part, plus optional form
+    fields:
+
+      * ``name`` — what to store it as; defaults to a timestamp
+      * ``speaker`` — alias or address, optional when only one is configured
+      * ``volume`` — 1-100, applied before playback
+      * ``id`` — who uploaded it, for the log
+
+    **The file is stored even if playback fails**, so a bad speaker address does
+    not cost you the upload; the result reports each half separately.
+
+    Uploads are never named ``speak_*``, which is the only pattern
+    :func:`purge` deletes — so nothing uploaded here is ever trimmed away.
+    """
+    logger.debug("airplay upload payload: %s", payload)
+
+    if pyatv is None:
+        return _error(
+            "pyatv not installed",
+            f"this job needs pyatv ('pip install pyatv'): {PYATV_IMPORT_ERROR}",
+        )
+
+    # Form fields arrive on request.form for a multipart body; query args come in
+    # as the payload. Form wins, matching webhook_payload()'s body-over-query rule.
+    fields: Dict[str, Any] = dict(payload if isinstance(payload, dict) else {})
+    try:
+        fields.update(request.form.to_dict())
+        grouped = request.files.to_dict(flat=False)
+    except RuntimeError as e:      # outside a request context
+        return _error("No request context", str(e))
+
+    # FileStorage is falsy when it has no filename, so test `is not None` — an
+    # iPhone Shortcut often sends a part with an empty filename.
+    parts = [f for flist in grouped.values() for f in flist
+             if f is not None and (f.filename or _has_content(f))]
+    if not parts:
+        return {
+            "status": "error",
+            "error": "no files",
+            "message": ("No file parts received. In the Shortcut, set Request Body "
+                        "to 'Form' and add a field of type 'File' (not Text)."),
+            "debug": {
+                "content_type": request.content_type,
+                "file_fields": list(grouped.keys()),
+                "form_fields": list(request.form.keys()),
+            },
+        }
+    if len(parts) > 1:
+        return _error(
+            "Too many files",
+            f"send one audio file at a time (got {len(parts)})",
+        )
+
+    person = resolve_person(fields)
+
+    volume, error_msg = _volume(fields)
+    if error_msg:
+        return _error("Invalid volume", error_msg)
+
+    stored_as, error_msg = _upload_name(_first(fields, NAME_KEYS), parts[0])
+    if error_msg:
+        return _error("Invalid name", error_msg)
+
+    name = _first(fields, SPEAKER_KEYS)
+    address = resolve_speaker(name)
+    if not address:
+        known = ", ".join(sorted(all_speakers())) or "(none configured)"
+        return _error(
+            "Missing speaker" if name is None else "Unknown speaker",
+            f"name a speaker in one of: {', '.join(SPEAKER_KEYS)}. "
+            f"Known speakers: {known}",
+        )
+
+    # Store first: an unreachable speaker must not cost the upload.
+    AUDIO_DIR.mkdir(exist_ok=True)
+    target = AUDIO_DIR / stored_as
+    replaced = target.exists()
+    try:
+        parts[0].save(target)
+    except OSError as e:
+        return _error("Could not store the file", str(e))
+
+    size = target.stat().st_size
+    write_log(
+        LOG_TYPE,
+        f"AIRPLAY UPLOAD by {person}: {stored_as} ({size} bytes"
+        f"{', replaced' if replaced else ''})",
+    )
+
+    result: Dict[str, Any] = {
+        "status": "ok",
+        "id": person,
+        "stored_as": stored_as,
+        "original": parts[0].filename or None,
+        "bytes": size,
+        "replaced": replaced,
+        "speaker": address,
+        "volume": volume,
+    }
+
+    with _speaking_lock:
+        if address in _speaking:
+            result["play"] = {
+                "status": "error",
+                "error": "Already speaking",
+                "message": f"{address} is busy - stored anyway, play it with "
+                           f"{{\"file\": \"{stored_as}\"}}",
+            }
+            result["message"] = f"Stored {stored_as}; {address} was busy"
+            return result
+        _speaking.add(address)
+
+    try:
+        thread = threading.Thread(
+            target=_run_speak,
+            args=(address, None, target, person, volume, None, None),
+            name=f"airplay-play-{address}",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as e:
+        with _speaking_lock:
+            _speaking.discard(address)
+        result["play"] = {"status": "error", "error": "Could not start playing",
+                          "message": str(e)}
+        result["message"] = f"Stored {stored_as} but could not play it"
+        return result
+
+    result["play"] = {"status": "started"}
+    result["message"] = f"Stored {stored_as} and playing it on {address}"
     return result
 
 

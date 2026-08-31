@@ -9,8 +9,10 @@ and silent when writing to a file:
     python3 tests/test_airplay_speak.py
 """
 
+import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -59,6 +61,19 @@ class airplay_env:
         return self
 
     def __exit__(self, *exc):
+        # Wait for any thread still speaking before the patches come off.
+        # `_speaking` is module-global, so a thread outliving its fixture would
+        # both leak "Already speaking" into the next test and — worse — fall back
+        # to the real AUDIO_DIR and the real stream.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            with ap._speaking_lock:
+                if not ap._speaking:
+                    break
+            time.sleep(0.01)
+        else:
+            raise AssertionError(f"threads still speaking on exit: {ap._speaking}")
+
         for patch in reversed(self._patches):
             patch.stop()
         self._tmp.cleanup()
@@ -293,6 +308,358 @@ def test_missing_pyatv_is_explained():
     print("  OK: a missing pyatv is a clear error, not an import crash")
 
 
+def test_plays_an_existing_recording():
+    """With `file` instead of `message`, an existing recording is played as-is."""
+    print("Testing file playback...")
+    with airplay_env() as env:
+        env.audio.mkdir(parents=True, exist_ok=True)
+        doorbell = env.audio / "doorbell.wav"
+        doorbell.write_bytes(b"RIFF" + bytes(2000))
+
+        res = ap.speak({"file": "doorbell.wav", "id": "Alex", "volume": 60, "speaker": "bedroom"})
+        assert res["status"] == "started", res
+        assert res["played"] == "doorbell.wav", res
+        assert "spoken" not in res and "voice" not in res, res   # nothing synthesized
+        assert env.drain("10.0.0.155")
+
+        # Exactly the file we asked for reached the stream, at the right volume.
+        assert len(env.streamed) == 1, env.streamed
+        address, audio, volume = env.streamed[0]
+        assert audio.name == "doorbell.wav" and volume == 60.0, env.streamed[0]
+
+        # The log names the file and carries no quoted words - there are none.
+        log_type, entry = env.log_entry()
+        assert log_type == "default", log_type
+        assert entry == ("AIRPLAY PLAY by Alex on 10.0.0.155 at 60% "
+                         "-> success [doorbell.wav]"), entry
+        assert "\n" not in entry, "a played file should log one line only"
+
+        # A file handed to us was never ours to delete.
+        assert doorbell.exists(), "playback must not remove the file"
+        assert doorbell.read_bytes()[:4] == b"RIFF", "the file was modified"
+
+        # This job's own output can be replayed too.
+        made = env.audio / "speak_20260831_101112_000_script.wav"
+        made.write_bytes(b"RIFF" + bytes(2000))
+        assert ap.speak({"file": made.name, "speaker": "bedroom"})["played"] == made.name
+        assert env.drain("10.0.0.155")
+        assert made.exists()
+    print("  OK: plays the named file, logs only its name, never deletes it")
+
+
+def test_file_cannot_escape_the_audio_directory():
+    """A path in `file` is reduced to its basename, so it cannot walk out."""
+    print("Testing file path safety...")
+    with airplay_env() as env:
+        env.audio.mkdir(parents=True, exist_ok=True)
+        (env.audio / "inside.wav").write_bytes(b"RIFF" + bytes(2000))
+
+        # Something that exists outside audio/ must not be reachable.
+        outside = Path(env.audio).parent / "outside.wav"
+        outside.write_bytes(b"RIFF" + bytes(2000))
+        res = ap.speak({"file": "../outside.wav", "speaker": "bedroom"})
+        assert res["error"] == "Unknown file", res
+        assert not env.streamed, "a traversal reached the stream"
+
+        # Nothing whose basename is absent or unplayable gets through.
+        for attempt in ("../../etc/passwd", "/etc/passwd", "..", ".", "../outside.wav"):
+            res = ap.speak({"file": attempt, "speaker": "bedroom"})
+            assert res["error"] == "Unknown file", (attempt, res)
+            assert not env.streamed, (attempt, "reached the stream")
+
+        # Only the basename matters, so a path whose *last* component is a real
+        # file in audio/ does resolve — to that file, never to the given path.
+        for attempt in ("subdir/inside.wav", "~/inside.wav", "/tmp/inside.wav"):
+            res = ap.speak({"file": attempt, "speaker": "bedroom"})
+            assert res["played"] == "inside.wav", (attempt, res)
+            assert env.drain("10.0.0.155")
+            assert env.streamed[-1][1].parent == env.audio, env.streamed[-1]
+
+        # resolve_recording never returns anything outside audio/.
+        for attempt in ("../outside.wav", "/etc/passwd", "a/b/c/inside.wav"):
+            target, error = ap.resolve_recording(attempt)
+            assert target is None or target.parent == env.audio, (attempt, target)
+    print("  OK: only the basename is used; traversal and absolute paths rejected")
+
+
+def test_file_validation():
+    """A missing, unplayable, or conflicting file request is reported."""
+    print("Testing file validation...")
+    with airplay_env() as env:
+        env.audio.mkdir(parents=True, exist_ok=True)
+        (env.audio / "doorbell.wav").write_bytes(b"RIFF" + bytes(2000))
+        (env.audio / "notes.txt").write_text("not audio", encoding="utf-8")
+
+        # Wrong extension: caught here rather than failing inside the stream.
+        res = ap.speak({"file": "notes.txt", "speaker": "bedroom"})
+        assert res["error"] == "Unknown file", res
+        assert "playable" in res["message"], res
+
+        # Absent file: the error lists what is actually there.
+        res = ap.speak({"file": "nope.wav", "speaker": "bedroom"})
+        assert res["error"] == "Unknown file", res
+        assert "doorbell.wav" in res["message"], res
+
+        # Both a message and a file is ambiguous for something played out loud.
+        res = ap.speak({"message": "hi", "file": "doorbell.wav", "speaker": "bedroom"})
+        assert res["error"] == "Conflicting request", res
+        assert "not both" in res["message"], res
+
+        # Neither: the error mentions both options.
+        res = ap.speak({})
+        assert res["error"] == "Missing message", res
+        assert "file" in res["message"], res
+
+        # Every playable suffix is accepted by the resolver.
+        for suffix in ap.PLAYABLE_SUFFIXES:
+            f = env.audio / f"clip{suffix}"
+            f.write_bytes(b"RIFF" + bytes(2000))
+            target, error = ap.resolve_recording(f.name)
+            assert error is None and target == f, (suffix, error)
+
+        # Case-insensitive suffix.
+        upper = env.audio / "CLIP.WAV"
+        upper.write_bytes(b"RIFF" + bytes(2000))
+        assert ap.resolve_recording("CLIP.WAV")[1] is None
+
+        assert not env.streamed, "a rejected request reached the stream"
+    print("  OK: extension, absence, and message+file conflicts all reported")
+
+
+def test_purge_leaves_hand_placed_files_alone():
+    """A doorbell.wav you dropped in audio/ survives a purge."""
+    print("Testing purge against hand-placed audio...")
+    with airplay_env() as env:
+        env.audio.mkdir(parents=True, exist_ok=True)
+        doorbell = env.audio / "doorbell.wav"
+        doorbell.write_bytes(b"RIFF" + bytes(2000))
+        mine = env.audio / f"{ap.AUDIO_PREFIX}20260831_000000_000_x{ap.AUDIO_SUFFIX}"
+        mine.write_bytes(b"RIFF" + bytes(2000))
+
+        res = ap.purge({"records": 0})
+        assert res["removed"] == 1, res              # only this job's own output
+        assert not mine.exists(), "the job's recording should have gone"
+        assert doorbell.exists(), "purge deleted a hand-placed file"
+        # ...and it is still playable afterwards.
+        assert ap.resolve_recording("doorbell.wav")[1] is None
+    print("  OK: purge only trims speak_*.wav, so custom clips persist")
+
+
+
+WAV_BYTES = b"RIFF" + bytes(4) + b"WAVE" + bytes(3000)
+
+
+def _client():
+    """A Flask test client and the secret header, or ``(None, None)`` to skip."""
+    try:
+        from app import app as flask_app
+    except ImportError as e:
+        print(f"  SKIP: {e}")
+        return None, None
+    secret_path = Path(__file__).parent.parent / "configs" / "webhook_secret.json"
+    if not secret_path.exists():
+        print("  SKIP: configs/webhook_secret.json not set up")
+        return None, None
+    secret = json.loads(secret_path.read_text())["WEBHOOK_SECRET"]
+    return flask_app.test_client(), {"X-Webhook-Secret": secret}
+
+
+def _upload(client, headers, **fields):
+    """POST a one-file multipart upload, returning the job's result dict."""
+    data = {"file": (io.BytesIO(WAV_BYTES), fields.pop("_filename", "clip.wav"))}
+    data.update({k: str(v) for k, v in fields.items()})
+    response = client.post("/webhook/speak/upload", headers=headers, data=data,
+                           content_type="multipart/form-data")
+    return response.get_json()["result"]
+
+
+def test_upload_stores_then_plays():
+    """An uploaded file lands in audio/ and is played."""
+    print("Testing upload then play...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        res = _upload(client, headers, name="front-door.wav", volume=70, id="Alex")
+        assert res["status"] == "ok", res
+        assert res["stored_as"] == "front-door.wav", res
+        assert res["original"] == "clip.wav", res
+        assert res["bytes"] == len(WAV_BYTES), res
+        assert res["id"] == "Alex" and res["volume"] == 70.0, res
+        assert res["play"]["status"] == "started", res
+        assert env.drain("10.0.0.155")
+
+        stored = env.audio / "front-door.wav"
+        assert stored.is_file(), "the upload was not stored"
+        assert stored.read_bytes() == WAV_BYTES, "the stored bytes differ"
+
+        # It was played, at the volume asked for, from audio/.
+        assert len(env.streamed) == 1, env.streamed
+        _, audio, volume = env.streamed[0]
+        assert audio == stored and volume == 70.0, env.streamed[0]
+
+        # Two log lines: the upload, then the playback naming the file.
+        assert stored.exists(), "playing an upload must not delete it"
+    print("  OK: stored in audio/, played at the given volume, kept")
+
+
+def test_upload_naming():
+    """`name` decides the filename; without one a timestamp is used."""
+    print("Testing upload naming...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        # No name -> a date-and-time stem. Note "/" and ":" cannot appear in a
+        # filename, so the separators are "-" and "_".
+        res = _upload(client, headers)
+        assert env.drain("10.0.0.155")
+        stem = Path(res["stored_as"]).stem
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", stem), stem
+        assert res["stored_as"].endswith(".wav"), res
+
+        # A name without an extension gets one from the upload.
+        res = _upload(client, headers, name="doorbell")
+        assert env.drain("10.0.0.155")
+        assert res["stored_as"] == "doorbell.wav", res
+
+        # "as" works as an alternative key.
+        res = _upload(client, headers, **{"as": "chime.wav"})
+        assert env.drain("10.0.0.155")
+        assert res["stored_as"] == "chime.wav", res
+
+        # A path in the name is reduced to its basename — it cannot escape audio/.
+        res = _upload(client, headers, name="../../etc/evil.wav")
+        assert env.drain("10.0.0.155")
+        assert res["stored_as"] == "evil.wav", res
+        assert (env.audio / "evil.wav").is_file()
+        assert not (env.audio.parent.parent / "etc" / "evil.wav").exists()
+
+        # Re-uploading the same name replaces it, and says so.
+        res = _upload(client, headers, name="doorbell.wav")
+        assert env.drain("10.0.0.155")
+        assert res["replaced"] is True, res
+    print("  OK: timestamp default, extension inferred, paths stripped")
+
+
+def test_upload_cannot_use_the_reserved_prefix():
+    """An upload may not be named speak_*, the only pattern purge deletes."""
+    print("Testing the reserved prefix...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        for name in ("speak_sneaky", "speak_sneaky.wav", "SPEAK_shouty.wav",
+                     "../speak_evil.wav"):
+            res = _upload(client, headers, name=name)
+            assert res["error"] == "Invalid name", (name, res)
+            assert "reserved" in res["message"], res
+        assert not env.audio.exists() or not list(env.audio.glob("speak_*")), \
+            "a reserved-prefix upload was stored"
+    print("  OK: speak_* is rejected, so an upload can never be purged")
+
+
+def test_uploads_survive_purge():
+    """Whatever it is named, an upload is never trimmed by purge."""
+    print("Testing uploads against purge...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        for name in ("doorbell.wav", "chime.mp3", "front-door.wav"):
+            _upload(client, headers, name=name)
+            assert env.drain("10.0.0.155")
+
+        # Plus one of the job's own synthesized recordings.
+        mine = env.audio / f"{ap.AUDIO_PREFIX}20260831_000000_000_x{ap.AUDIO_SUFFIX}"
+        mine.write_bytes(b"RIFF")
+
+        res = ap.purge({"records": 0})
+        assert res["removed"] == 1, res            # only the synthesized one
+        assert not mine.exists(), "the synthesized recording should have gone"
+        survivors = sorted(f.name for f in env.audio.iterdir())
+        assert survivors == ["chime.mp3", "doorbell.wav", "front-door.wav"], survivors
+    print("  OK: purge removes only synthesized speech; uploads persist")
+
+
+def test_upload_validation():
+    """Bad or missing uploads are reported and nothing is stored."""
+    print("Testing upload validation...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        # A non-audio file: the type cannot be guessed, so it is refused.
+        res = _upload(client, headers, _filename="notes.txt")
+        assert res["error"] == "Invalid name", res
+        assert "kind of audio" in res["message"], res
+
+        # No file part at all, with a hint about the Shortcut Form field.
+        response = client.post("/webhook/speak/upload", headers=headers,
+                               data={"name": "x"}, content_type="multipart/form-data")
+        res = response.get_json()["result"]
+        assert res["error"] == "no files", res
+        assert "File" in res["message"], res
+        assert "form_fields" in res["debug"], res
+
+        # Two files at once is ambiguous.
+        response = client.post(
+            "/webhook/speak/upload", headers=headers,
+            data={"a": (io.BytesIO(WAV_BYTES), "one.wav"),
+                  "b": (io.BytesIO(WAV_BYTES), "two.wav")},
+            content_type="multipart/form-data")
+        assert response.get_json()["result"]["error"] == "Too many files"
+
+        res = _upload(client, headers, volume=0)
+        assert res["error"] == "Invalid volume", res
+
+        assert not env.audio.exists() or not list(env.audio.iterdir()), \
+            "a rejected upload was stored"
+    print("  OK: non-audio, missing, multiple and bad volume all rejected")
+
+
+def test_upload_is_stored_even_if_playback_cannot_start():
+    """A busy or unreachable speaker must not cost the upload."""
+    print("Testing upload with playback blocked...")
+    client, headers = _client()
+    if not client:
+        return
+
+    with airplay_env(config=ONE_SPEAKER) as env:
+        # Hold the speaker so playback cannot start.
+        with ap._speaking_lock:
+            ap._speaking.add("10.0.0.155")
+        try:
+            res = _upload(client, headers, name="held.wav")
+            assert res["status"] == "ok", res             # the upload succeeded
+            assert (env.audio / "held.wav").is_file(), "the file was not stored"
+            assert res["play"]["error"] == "Already speaking", res
+            assert "held.wav" in res["play"]["message"], res["play"]
+        finally:
+            with ap._speaking_lock:
+                ap._speaking.discard("10.0.0.155")
+    print("  OK: stored anyway, with the playback failure reported separately")
+
+
+def test_upload_webhook_is_registered():
+    """config.json wires upload up alongside the other speak paths."""
+    print("Testing upload registration...")
+    configs = Path(__file__).parent.parent / "configs"
+    hooks = {h["path"]: h for h in json.loads((configs / "config.json").read_text())["webhooks"]}
+    hook = hooks.get("/webhook/speak/upload")
+    assert hook, "/webhook/speak/upload not registered"
+    assert hook["module"] == "jobs.airplay_speak" and hook["function"] == "upload", hook
+    assert hook["require_secret"] is True, hook
+    assert {"/webhook/speak/ha", "/webhook/speak/airplay",
+            "/webhook/speak/upload", "/webhook/speak/purge"} <= set(hooks), sorted(hooks)
+    print("  OK: /webhook/speak/upload registered, secret required")
+
+
 def test_purge_keeps_the_newest():
     """purge() trims audio/ to the N most recent recordings."""
     print("Testing purge...")
@@ -440,6 +807,17 @@ if __name__ == "__main__":
     test_one_stream_per_speaker()
     test_validation()
     test_missing_pyatv_is_explained()
+    test_plays_an_existing_recording()
+    test_file_cannot_escape_the_audio_directory()
+    test_file_validation()
+    test_purge_leaves_hand_placed_files_alone()
+    test_upload_stores_then_plays()
+    test_upload_naming()
+    test_upload_cannot_use_the_reserved_prefix()
+    test_uploads_survive_purge()
+    test_upload_validation()
+    test_upload_is_stored_even_if_playback_cannot_start()
+    test_upload_webhook_is_registered()
     test_purge_keeps_the_newest()
     test_purge_only_touches_its_own_files()
     test_purge_validation_and_failures()

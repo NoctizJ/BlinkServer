@@ -387,8 +387,9 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
 | POST   | `/webhook/lutron/status`      | Report every configured light's state and brightness (see [Light status](#light-status)) 🔒 |
 | POST   | `/webhook/speak/ha`           | Say a message via Home Assistant (see [Speak](#speak)) 🔒 |
-| POST   | `/webhook/speak/airplay`      | Say a message straight to an AirPlay speaker (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
-| POST   | `/webhook/speak/purge`        | Trim `audio/` to the N most recent recordings 🔒 |
+| POST   | `/webhook/speak/airplay`      | Say a message, or play a file from `audio/`, on an AirPlay speaker (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
+| POST   | `/webhook/speak/upload`       | Upload an audio file to `audio/` and play it (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
+| POST   | `/webhook/speak/purge`        | Trim `audio/` to the N most recent **synthesized** recordings 🔒 |
 | POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
@@ -1203,13 +1204,114 @@ curl -X POST http://localhost:5050/webhook/speak/airplay \
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `message` (or `text`) | yes | What to say; max 500 characters |
+| `message` (or `text`) | one of these | What to say; max 500 characters |
+| `file` (or `filename`) | one of these | Play an existing recording from `audio/` instead of synthesizing |
 | `speaker` (or `host`) | see note | An alias from `airplay_config.json`, or a raw IP |
 | `volume` | no | Speaker volume 1-100, set before speaking |
 | `voice` | no | A macOS voice name, overriding the configured one |
 | `id` | no | Who is asking; recorded in the log. Defaults to `娜` |
 
-`speaker` may be omitted when exactly one is configured.
+`speaker` may be omitted when exactly one is configured. Give **either** `message`
+or `file`, not both — for something that plays out loud, guessing which you meant
+would be worse than asking.
+
+### Playing an existing recording
+
+```bash
+-d '{"file": "doorbell.wav"}'
+-d '{"file": "speak_20260831_101112_000_script.wav", "volume": 60}'
+```
+
+The file is read from `audio/` and streamed as-is — nothing is synthesized, and
+`voice` is ignored. **Any** playable file counts (`.wav`, `.mp3`, `.flac`, `.ogg`),
+not only this job's own output, so you can drop a `doorbell.wav` in there and play
+it by name. Purge only ever deletes `speak_*.wav`, so hand-placed clips persist.
+
+Only the **basename** is used, so a value like `../../etc/passwd` becomes
+`passwd` and then has to exist in `audio/` like anything else — nothing can be
+played from outside that directory. A file handed in this way is never deleted.
+
+It logs one line, naming the file, with no quoted words because there are none:
+
+```text
+AIRPLAY PLAY by Alex on 10.0.0.155 at 60% -> success [doorbell.wav]
+```
+
+Compare a spoken request, which adds the words on a second line:
+
+```text
+AIRPLAY SPEAK by Alex on 10.0.0.155 at 40% -> success [speak_20260831_101112_000_Alex.wav]
+"Dinner is ready"
+```
+
+### Uploading a clip and playing it
+
+Send an audio file and it is stored in `audio/` then played straight away.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/upload \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -F "file=@doorbell.wav" \
+  -F "name=doorbell" \
+  -F "volume=70"
+```
+
+```json
+{"status": "ok", "id": "娜", "stored_as": "doorbell.wav", "original": "doorbell.wav",
+ "bytes": 30124, "replaced": false, "speaker": "10.0.0.155", "volume": 70.0,
+ "play": {"status": "started"},
+ "message": "Stored doorbell.wav and playing it on 10.0.0.155"}
+```
+
+`multipart/form-data` with **one** file part, plus optional form fields:
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| the file part | yes | The audio: `.wav`, `.mp3`, `.flac` or `.ogg` |
+| `name` (or `as`) | no | What to store it as. Without one, a date and time is used |
+| `speaker` (or `host`) | see note | Alias or address; optional when only one is configured |
+| `volume` | no | 1-100, applied before playback |
+| `id` | no | Who uploaded it, for the log |
+
+With no `name` you get `2026-08-31_10-56-07.wav`. Note the separators: `/` is a
+path separator and `:` is awkward on several filesystems, so a plain
+`2026/08/31-10:56:07` is not usable as a filename — dashes and an underscore
+stand in for it.
+
+An extension is added if your `name` lacks one, taken from the uploaded file or
+its MIME type. Only the **basename** of `name` is used, so `../../etc/evil.wav`
+becomes `evil.wav` inside `audio/`. Re-using a name replaces the file and reports
+`"replaced": true`.
+
+**`speak_*` names are rejected.** That prefix is reserved for synthesized speech
+and is the only pattern [purge](#purging-recordings) deletes — so nothing you
+upload here can ever be trimmed away.
+
+**The file is stored even if playback fails.** A busy or unreachable speaker does
+not cost you the upload; `play` reports that half separately:
+
+```json
+{"status": "ok", "stored_as": "held.wav",
+ "play": {"status": "error", "error": "Already speaking",
+          "message": "10.0.0.155 is busy - stored anyway, play it with {\"file\": \"held.wav\"}"}}
+```
+
+It logs the upload and the playback as two entries:
+
+```text
+AIRPLAY UPLOAD by Alex: doorbell.wav (30124 bytes)
+AIRPLAY PLAY by Alex on 10.0.0.155 at 70% -> success [doorbell.wav]
+```
+
+Replay it any time afterwards without uploading again:
+
+```bash
+-d '{"file": "doorbell.wav", "volume": 70}'
+```
+
+From an iPhone Shortcut, use "Get Contents of URL" with Method POST, the
+`X-Webhook-Secret` header, and Request Body set to **Form** with a field of type
+**File** — the same shape as [Uploads.md](docs/Uploads.md).
 
 ### How it works
 
@@ -1299,6 +1401,11 @@ curl -X POST http://localhost:5050/webhook/speak/purge \
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
 | `records` (or `keep`) | no | How many of the newest to keep; default 20. `0` removes them all |
+
+Note this trims **only** `speak_*.wav` — synthesized speech. Anything uploaded
+through [`/webhook/speak/upload`](#uploading-a-clip-and-playing-it), or dropped
+into `audio/` by hand, is never removed however low you set `records`. Uploads
+are forbidden from using the `speak_` prefix precisely so this stays true.
 
 - **Newest is by modification time**, not filename, so a renamed file still orders
   correctly.

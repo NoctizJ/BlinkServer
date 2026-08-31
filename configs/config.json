@@ -115,6 +115,12 @@
       "require_secret": true
     },
     {
+      "path": "/webhook/speak/upload",
+      "module": "jobs.airplay_speak",
+      "function": "upload",
+      "require_secret": true
+    },
+    {
       "path": "/webhook/speak/purge",
       "module": "jobs.airplay_speak",
       "function": "purge",
