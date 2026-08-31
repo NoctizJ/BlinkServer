@@ -51,8 +51,8 @@ background thread. Lutron hardware needs real time to switch, so the interval is
 in whole seconds rather than the milliseconds a Morse pattern would want.
 
 ``status`` reports what Home Assistant currently says about every configured
-light — state, brightness and friendly name — as a text table like the presence
-summary. It takes no fields.
+light as a short text summary — one line per state, with each on light's
+brightness inline. It takes no fields.
 
 ``scene`` activates a scene, with an optional ``transition``::
 
@@ -88,7 +88,7 @@ try:
     from jobs.home_assistant_switches import enabled_for as ha_feature_enabled
     from jobs.home_assistant_switches import skipped as ha_feature_skipped
     from jobs.log_engine import log as write_log
-    from jobs.text_format import display_width, pad, rule
+    from jobs.text_format import rule
 except ImportError:  # pragma: no cover - allows running this file directly
     from home_assistant_api import call_service, get_states
     from home_assistant_entities import aliases as ha_aliases
@@ -96,7 +96,7 @@ except ImportError:  # pragma: no cover - allows running this file directly
     from home_assistant_switches import enabled_for as ha_feature_enabled
     from home_assistant_switches import skipped as ha_feature_skipped
     from log_engine import log as write_log
-    from text_format import display_width, pad, rule
+    from text_format import rule
 
 logger = logging.getLogger(__name__)
 
@@ -587,52 +587,42 @@ def _light_rows(states: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def format_lights(rows: List[Dict[str, Any]]) -> str:
-    """Render the light rows as a plain text report.
+    """Render the light rows as a short plain text report.
 
-    Laid out like the presence summary: a count, a rule, the on/off name lists,
-    then one aligned row per light::
+    A count, a rule, and one line per state — with each on light's brightness
+    inline, so the whole picture fits in three lines::
 
         Lutron lights — 4 lights
-        ---------------------------------------------------------------------
-        On (2): kitchen, living
-        Off (1): hallway
-        Missing (1): porch
+        ----------------------------------------
+        On (2): dining (10%), living (40%)
+        Off (1): kitchen
+        Missing/unavailable (1): porch
 
-        hallway  off      -  switch.hallway_lights     Hallway Lights
-        kitchen  on    100%  light.kitchen_main        Kitchen Main
-        living   on     40%  light.living_room_dimmer  Living Room
-        porch    missing  -  light.porch_old
+    The per-light entity ids and friendly names are in the ``lights`` field of the
+    result rather than here. The ``Missing/unavailable`` line only appears when
+    something is actually wrong.
     """
     if not rows:
         return "Lutron lights — none configured."
 
-    on = sorted(r["alias"] for r in rows if r["state"] == "on")
+    def labelled(row: Dict[str, Any]) -> str:
+        """A light's alias, with its brightness when it has one."""
+        if row["brightness"] == NO_BRIGHTNESS:
+            return row["alias"]
+        return f"{row['alias']} ({row['brightness']})"
+
+    on = sorted(labelled(r) for r in rows if r["state"] == "on")
     off = sorted(r["alias"] for r in rows if r["state"] == "off")
     other = sorted(r["alias"] for r in rows if r["state"] not in ("on", "off"))
-
-    alias_width = max(display_width(r["alias"]) for r in rows)
-    state_width = max(display_width(r["state"]) for r in rows)
-    bright_width = max(display_width(r["brightness"]) for r in rows)
-    entity_width = max(display_width(r["entity_id"]) for r in rows)
-
-    body_rows = [
-        f"{pad(r['alias'], alias_width)}  {pad(r['state'], state_width)}  "
-        f"{' ' * (bright_width - display_width(r['brightness']))}{r['brightness']}  "
-        f"{pad(r['entity_id'], entity_width)}  {r['name']}".rstrip()
-        for r in rows
-    ]
 
     count = len(rows)
     header = f"Lutron lights — {count} {'light' if count == 1 else 'lights'}"
     summary = [f"On ({len(on)}): {', '.join(on) or NO_BRIGHTNESS}",
                f"Off ({len(off)}): {', '.join(off) or NO_BRIGHTNESS}"]
     if other:
-        # Only shown when something is unreachable or stale, so a healthy report
-        # stays two lines.
         summary.append(f"Missing/unavailable ({len(other)}): {', '.join(other)}")
 
-    return "\n".join(
-        [header, rule([header] + summary + body_rows)] + summary + [""] + body_rows)
+    return "\n".join([header, rule([header] + summary)] + summary)
 
 
 def status(payload: Dict[str, Any] = None) -> Dict[str, Any]:

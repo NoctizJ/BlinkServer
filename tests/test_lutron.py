@@ -568,36 +568,55 @@ def test_status_reads_all_states_in_one_request():
 
 
 def test_status_message_is_displayable():
-    """The report reads like the presence summary, and aligns wide characters."""
+    """The report is a count plus one line per state, brightness inline."""
     print("Testing the status text report...")
     wide = {"lutron": {"lights": {"kitchen": "light.kitchen_main",
+                                  "dining": "light.dining",
+                                  "hallway": "switch.hallway_lights",
                                   "娜の部屋": "light.nas_room"}}}
-    states = STATE_LIST + [{"entity_id": "light.nas_room", "state": "unavailable",
-                            "attributes": {"friendly_name": "娜の部屋"}}]
-    with lutron_env(entities=wide) as post:
+    states = STATE_LIST + [
+        {"entity_id": "light.dining", "state": "on",
+         "attributes": {"brightness": 26, "friendly_name": "Dining"}},   # 26/255 = 10%
+        {"entity_id": "light.nas_room", "state": "unavailable",
+         "attributes": {"friendly_name": "娜の部屋"}},
+    ]
+    with lutron_env(entities=wide):
         with mock.patch.object(ha_api.requests, "get",
                                return_value=mock.Mock(status_code=200, text="[]",
                                                       json=lambda: states)):
             message = lu.status({})["message"]
     print("\n" + message + "\n")
     lines = message.splitlines()
-    assert lines[0] == "Lutron lights — 2 lights", lines[0]
+    assert len(lines) == 5, lines                        # header, rule, on, off, missing
+    assert lines[0] == "Lutron lights — 4 lights", lines[0]
     assert set("-") == set(lines[1]), lines[1]
-    assert lines[2] == "On (1): kitchen", lines[2]
-    assert lines[3] == "Off (0): -", lines[3]
-    assert lines[4].startswith("Missing/unavailable (1): 娜の部屋"), lines[4]
-    assert lines[5] == "", lines
+    # Brightness rides inline with each on light.
+    assert lines[2] == "On (2): dining (10%), kitchen (100%)", lines[2]
+    assert lines[3] == "Off (1): hallway", lines[3]
+    assert lines[4] == "Missing/unavailable (1): 娜の部屋", lines[4]
     # The rule spans the widest line, counting 娜 as two columns.
     assert len(lines[1]) == max(display_width(line) for line in lines), lines[1]
+    # No per-light rows any more.
+    assert "light.kitchen_main" not in message, message
+    assert "" not in lines, "no blank line, so no row block"
 
-    # A healthy report stays two summary lines - no Missing line at all.
+    # A switch that is on has no brightness, so it carries no parenthesis.
+    switch_on = lu.format_lights([
+        {"alias": "hallway", "entity_id": "switch.h", "state": "on",
+         "brightness": "-", "name": "H"},
+    ])
+    assert "On (1): hallway" in switch_on, switch_on
+    assert "hallway (" not in switch_on, switch_on
+
+    # A healthy report is three lines - no Missing line at all.
     healthy = lu.format_lights([
         {"alias": "kitchen", "entity_id": "light.k", "state": "on",
          "brightness": "100%", "name": "K"},
     ])
+    assert len(healthy.splitlines()) == 4, healthy       # header, rule, on, off
     assert "Missing" not in healthy, healthy
-    assert healthy.startswith("Lutron lights — 1 light"), healthy   # singular
-    print("  OK: header, on/off lists, aligned rows, no Missing line when healthy")
+    assert healthy.startswith("Lutron lights — 1 light\n"), healthy   # singular
+    print("  OK: three lines, brightness inline, no table rows")
 
 
 def test_status_with_no_aliases_or_no_home_assistant():
