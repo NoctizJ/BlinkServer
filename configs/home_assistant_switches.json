@@ -1,0 +1,9 @@
+{
+  "features": {
+    "blink": true,
+    "notify": true,
+    "lutron": true,
+    "speak": false
+  },
+  "last_modified": null
+}

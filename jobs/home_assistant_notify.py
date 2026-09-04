@@ -11,7 +11,7 @@ The service call mirrors this request:
     curl -X POST \\
       -H "Authorization: Bearer <YOUR_TOKEN>" \\
       -H "Content-Type: application/json" \\
-      http://<hostID>:8123/api/services/notify/<HA_NOTIFY_TARGET> \\
+      http://<hostID>:8123/api/services/notify/<notify target> \\
       -d '{"title": "...", "message": "..."}'
 
 Titles and messages come from **configs/notify_config.json**, keyed by event
@@ -29,11 +29,28 @@ from typing import Dict, Any
 
 import requests
 
+try:
+    # Normal import path when loaded as part of the jobs package.
+    from jobs.home_assistant_entities import entity as ha_entity
+    from jobs.home_assistant_switches import NOTIFY as HA_NOTIFY_FEATURE
+    from jobs.home_assistant_switches import enabled_for as ha_feature_enabled
+    from jobs.home_assistant_switches import skipped as ha_feature_skipped
+except ImportError:  # pragma: no cover - allows running this file directly
+    from home_assistant_entities import entity as ha_entity
+    from home_assistant_switches import NOTIFY as HA_NOTIFY_FEATURE
+    from home_assistant_switches import enabled_for as ha_feature_enabled
+    from home_assistant_switches import skipped as ha_feature_skipped
+
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "home_assistant_config.json")
 
 NOTIFY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "configs", "notify_config.json")
+
+# Where the notify service target lives in home_assistant_entities.json. One
+# phone is shared by every home, so this key carries no home name.
+TARGET_FEATURE = "notify"
+TARGET_KEY = "target"
 
 
 def load_event_text(event: str) -> Dict[str, Any]:
@@ -71,9 +88,9 @@ def fill_placeholders(text: Any, values: Dict[str, Any]) -> str:
 def _load_ha_config() -> Dict[str, str]:
     """Load Home Assistant connection settings for phone notifications.
 
-    Reuses the same home_assistant_config.json as the arm/disarm job, but
-    requires an extra HA_NOTIFY_TARGET field naming the notify service target
-    (e.g. "mobile_app_aisingioro").
+    The same home_assistant_config.json the other Home Assistant jobs use. The
+    notify service target is no longer read from here — see
+    :func:`notify_target`.
     """
     try:
         with open(CONFIG_FILE, "r") as f:
@@ -83,7 +100,7 @@ def _load_ha_config() -> Dict[str, str]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in configuration file: {e}")
 
-    required_fields = ["HA_BASE_URL", "HA_API_KEY", "HA_NOTIFY_TARGET"]
+    required_fields = ["HA_BASE_URL", "HA_API_KEY"]
     for field in required_fields:
         if not config.get(field):
             raise ValueError(f"Missing required configuration field: {field}")
@@ -91,22 +108,49 @@ def _load_ha_config() -> Dict[str, str]:
     return config
 
 
+def notify_target() -> str:
+    """Return the Home Assistant notify service target for the phone.
+
+    Read from ``home_assistant_entities.json`` (``notify.target``).
+
+    Raises:
+        ValueError: the target is not configured.
+    """
+    target = ha_entity(TARGET_FEATURE, TARGET_KEY)
+    if not target:
+        raise ValueError(
+            f"No notify target configured: set '{TARGET_KEY}' under "
+            f"'{TARGET_FEATURE}' in configs/home_assistant_entities.json"
+        )
+    return target
+
+
 def notify_phone(title: str, message: str) -> Dict[str, Any]:
     """Send a notification to the configured phone via Home Assistant.
+
+    This is the single point every phone notification goes through, so the
+    ``notify`` feature switch in ``home_assistant_switches.json`` is checked here
+    and covers every caller at once.
 
     Args:
         title: The notification title.
         message: The notification body.
 
     Returns:
-        dict: {"status": "success"|"error", ...} describing the outcome. HTTP
-        failures are reported in the return value rather than raised;
-        configuration errors (missing file/fields) still raise ValueError.
+        dict: {"status": "success"|"error"|"skipped", ...} describing the outcome.
+        HTTP failures are reported in the return value rather than raised;
+        configuration errors (missing file/fields) still raise ValueError. A
+        ``"skipped"`` result means the ``notify`` feature is switched off — no
+        request was made and the configuration was not read.
     """
+    if not ha_feature_enabled(HA_NOTIFY_FEATURE):
+        logger.debug("notify_phone skipped: Home Assistant '%s' is off", HA_NOTIFY_FEATURE)
+        return ha_feature_skipped(HA_NOTIFY_FEATURE)
+
     config = _load_ha_config()
     base_url = config["HA_BASE_URL"].rstrip("/")
     api_key = config["HA_API_KEY"]
-    target = config["HA_NOTIFY_TARGET"]
+    target = notify_target()
 
     endpoint = f"{base_url}/api/services/notify/{target}"
     headers = {

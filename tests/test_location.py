@@ -43,7 +43,7 @@ class temp_location_dir:
         self._patches = [
             mock.patch.object(ls, "STATE_DIR", state),
             mock.patch.object(ln, "SWITCH_FILE",
-                              root / "configs" / "location_notify_config.json"),
+                              root / "configs" / "notify_switches.json"),
             mock.patch.object(ln, "notify_phone",
                               return_value={"status": "success", "message": "sent"}),
         ]
@@ -431,9 +431,14 @@ def test_purge_ages_by_recorded_at_and_keeps_undated():
         assert lw.purge({"id": "Alex", "days": 10})["removed"] == 1
 
         # No recorded_at at all -> fall back to `time`.
+        # The ISO 8601 entry is dated relative to now, like `old` above: a literal
+        # date silently ages out of the purge window and the test starts failing on
+        # a date nobody chose.
+        recent_iso = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
         ls.save_locations("Sam", {"entries": [
             {"latitude": 1, "longitude": 2, "time": old},
-            {"latitude": 3, "longitude": 4, "time": "2026-08-18T09:15:23Z"},  # ISO 8601
+            {"latitude": 3, "longitude": 4, "time": recent_iso},              # ISO 8601
             {"latitude": 5, "longitude": 6, "time": "whenever"},              # undated
             {"latitude": 7, "longitude": 8},                                  # undated
         ]})
@@ -891,9 +896,9 @@ def test_webhooks_are_registered():
         assert callable(getattr(lw, action, None)), action
 
     # One module means one job switch, like presence_webhook.
-    job_config = json.loads(
-        (Path(__file__).parent.parent / "configs" / "job_config.json").read_text())
-    assert "location_webhook" in job_config["jobs"], job_config
+    job_switches = json.loads(
+        (Path(__file__).parent.parent / "configs" / "job_switches.json").read_text())
+    assert "location_webhook" in job_switches["jobs"], job_switches
     print("  OK: /webhook/location/{log,fetch,history,purge} -> one job, secret required")
 
 

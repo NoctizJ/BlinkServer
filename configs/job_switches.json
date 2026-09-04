@@ -1,0 +1,15 @@
+{
+  "jobs": {
+    "home_assistant_blink": true,
+    "sample_job": true,
+    "file_upload": true,
+    "notify_phone": true,
+    "presence_webhook": true,
+    "location_webhook": true,
+    "home_assistant_lutron": true,
+    "log": true,
+    "home_assistant_speak": true,
+    "airplay_speak": true
+  },
+  "last_modified": "2026-08-30 14:44:48.583430"
+}

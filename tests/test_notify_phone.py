@@ -10,6 +10,7 @@ nothing is written to the repo:
     python3 test_notify_phone.py
 """
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import jobs.home_assistant_entities as he
 import jobs.home_assistant_notify as han
 import jobs.notify_phone as np
 import jobs.presence_state as ps
@@ -24,8 +26,12 @@ import jobs.presence_state as ps
 FAKE_HA_CONFIG = {
     "HA_BASE_URL": "http://host:8123",
     "HA_API_KEY": "test-token",
-    "HA_NOTIFY_TARGET": "mobile_app_aisingioro",
 }
+
+# The notify target and panel entity live in home_assistant_entities.json now,
+# so tests that reach notify_phone()/set_alarm() stub them rather than relying on
+# whatever the repo's real entities file happens to hold.
+FAKE_TARGET = "mobile_app_aisingioro"
 
 
 class temp_presence_file:
@@ -53,6 +59,7 @@ def test_wrapper_posts_to_notify_service():
     """notify_phone() hits /api/services/notify/<target> with title/message."""
     print("Testing home_assistant_notify.notify_phone()...")
     with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(han, "notify_target", return_value=FAKE_TARGET), \
             mock.patch.object(han.requests, "post") as post:
         post.return_value = mock.Mock(status_code=200, text="{}")
         result = han.notify_phone("API Test", "Hello from test")
@@ -69,6 +76,7 @@ def test_http_failure_is_reported_not_raised():
     """A non-2xx response returns an error dict rather than raising."""
     print("Testing notify_phone() HTTP failure handling...")
     with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(han, "notify_target", return_value=FAKE_TARGET), \
             mock.patch.object(han.requests, "post") as post:
         post.return_value = mock.Mock(status_code=401, text="unauthorized")
         result = han.notify_phone("T", "M")
@@ -171,13 +179,13 @@ def test_leaving_arms_arriving_disarms():
             mock.patch.object(np, "set_alarm", return_value={"status": "success"}) as alarm, \
             mock.patch.object(np, "write_log"):
         res = np.leaving_home({"arm": True})
-        alarm.assert_called_once_with("arm")
+        alarm.assert_called_once_with("arm", home=ps.DEFAULT_HOME)
         assert res["alarm"]["status"] == "success"
         assert res["notify"]["status"] == "success"
 
         alarm.reset_mock()
         np.arriving_home({"disarm": True})
-        alarm.assert_called_once_with("disarm")
+        alarm.assert_called_once_with("disarm", home=ps.DEFAULT_HOME)
     print("  OK: leaving -> arm, arriving -> disarm")
 
 
@@ -329,7 +337,7 @@ def test_per_home_arm_flag():
 
         # Home M turns it on.
         np.leaving_home({"id": "Sam", "home": "M"})
-        alarm.assert_called_once_with("arm")
+        alarm.assert_called_once_with("arm", home="M")
 
         # Home T's explicit false is honored, not treated as unset.
         alarm.reset_mock()
@@ -338,7 +346,7 @@ def test_per_home_arm_flag():
 
         # The payload still beats the home block.
         np.leaving_home({"id": "Sam", "home": "T", "arm": True})
-        alarm.assert_called_once_with("arm")
+        alarm.assert_called_once_with("arm", home="T")
     print("  OK: per-home arm flag overrides the shared one, false honored")
 
 
@@ -375,6 +383,424 @@ def test_odd_homes_block_falls_back():
                 np.leaving_home({"id": "Sam", "home": "M"})
                 assert sent.call_args[0] == ("Shared (A)", "Body"), (bad, sent.call_args[0])
     print("  OK: an unusable homes block falls back to the shared text")
+
+
+def test_blink_webhooks_notify_the_phone():
+    """/webhook/blink/arm and /disarm push a notification with the configured text."""
+    print("Testing the blink arm/disarm notification...")
+    import jobs.home_assistant_blink as hd
+
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}) as alarm, \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text", return_value={}), \
+            mock.patch.object(hd, "write_log"):
+        # No config entry -> the built-in defaults.
+        res = hd.arm()
+        alarm.assert_called_once_with("arm", home=ps.DEFAULT_HOME)
+        assert sent.call_args[0] == (f"Blink Control {ps.DEFAULT_HOME} (A)", ""), sent.call_args[0]
+        assert res["notify"]["status"] == "success", res
+
+        sent.reset_mock()
+        hd.disarm()
+        assert sent.call_args[0] == (f"Blink Control {ps.DEFAULT_HOME} (D)", ""), sent.call_args[0]
+
+    # A configured title/message wins over the default.
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text",
+                              return_value={"title": "Panel armed", "message": "Away mode"}), \
+            mock.patch.object(hd, "write_log"):
+        hd.arm()
+        assert sent.call_args[0] == ("Panel armed", "Away mode"), sent.call_args[0]
+    print("  OK: blink webhooks notify, config text overrides the defaults")
+
+
+def test_blink_notification_names_the_home():
+    """"{home}" in a blink title is replaced with the house that was changed."""
+    print("Testing {home} in the blink notification...")
+    import jobs.home_assistant_blink as hd
+
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text",
+                              return_value={"title": "Blink Control {home} (A)",
+                                            "message": "{home} panel changed"}), \
+            mock.patch.object(hd, "write_log"):
+        hd.arm({"home": "M"})
+        assert sent.call_args[0] == ("Blink Control M (A)", "M panel changed"), sent.call_args[0]
+
+        hd.arm({})                                    # no home -> the default
+        assert sent.call_args[0][0] == f"Blink Control {ps.DEFAULT_HOME} (A)", sent.call_args[0]
+
+    # The built-in fallbacks carry the placeholder too, so it is never sent raw.
+    for action, letter in (("arm", "A"), ("disarm", "D")):
+        title = hd.DEFAULT_BLINK_NOTIFY[action]["title"]
+        assert title == f"Blink Control {{home}} ({letter})", title
+
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text", return_value={}), \
+            mock.patch.object(hd, "write_log"):
+        hd.disarm({"home": "M"})
+        assert sent.call_args[0][0] == "Blink Control M (D)", sent.call_args[0]
+        assert "{home}" not in sent.call_args[0][0], "placeholder sent unfilled"
+
+    # And the shipped config uses it.
+    shipped = json.loads(
+        (Path(__file__).parent.parent / "configs" / "notify_config.json").read_text())
+    assert shipped["blink_arm"]["title"] == "Blink Control {home} (A)", shipped["blink_arm"]
+    assert shipped["blink_disarm"]["title"] == "Blink Control {home} (D)", shipped["blink_disarm"]
+    print("  OK: {home} filled from the payload, defaults and config agree")
+
+
+def test_blink_notification_survives_a_broken_panel():
+    """The notification is sent even when the panel call fails or raises."""
+    print("Testing the blink notification against a broken panel...")
+    import jobs.home_assistant_blink as hd
+
+    # set_alarm raising (e.g. the HA config file is missing) must not lose it.
+    with mock.patch.object(hd, "set_alarm", side_effect=ValueError("config gone")), \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+            mock.patch.object(hd, "load_event_text", return_value={}), \
+            mock.patch.object(hd, "write_log"):
+        res = hd.arm()
+        assert res["status"] == "error" and "config gone" in res["message"], res
+        assert sent.call_args[0][0].startswith("Blink Control"), sent.call_args[0]
+        assert res["notify"]["status"] == "success", res
+
+    # And a failing notification must not lose the arm result.
+    with mock.patch.object(hd, "set_alarm", return_value={"status": "success"}), \
+            mock.patch.object(hd, "notify_phone", side_effect=ValueError("no target")), \
+            mock.patch.object(hd, "load_event_text", return_value={}), \
+            mock.patch.object(hd, "write_log"):
+        res = hd.disarm()
+        assert res["status"] == "success", res
+        assert res["notify"]["status"] == "error", res
+    print("  OK: panel and notification failures are independent")
+
+
+def test_leaving_arriving_send_exactly_one_notification():
+    """set_alarm must not notify, or the notify webhooks would send two.
+
+    Guards the boundary: the blink notification lives in the arm/disarm webhook
+    handlers, not in the shared set_alarm() core that notify_phone also calls.
+    """
+    print("Testing that leaving/arriving still send one notification...")
+    import jobs.home_assistant_blink as hd
+
+    with temp_presence_file(), \
+            mock.patch.object(np, "notify_phone", return_value={"status": "success"}) as np_sent, \
+            mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as hd_sent, \
+            mock.patch.object(hd, "load_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(hd.requests, "post",
+                              return_value=mock.Mock(status_code=200, text="{}")), \
+            mock.patch.object(np, "write_log"), mock.patch.object(hd, "write_log"):
+        # A real set_alarm call runs here (HTTP mocked), so if it notified we'd see it.
+        np.leaving_home({"id": "Alex", "arm": True})
+        assert np_sent.call_count == 1, np_sent.call_count
+        assert hd_sent.call_count == 0, "set_alarm sent a second notification"
+    print("  OK: one notification per leaving/arriving event")
+
+
+def test_blink_notify_switches():
+    """The blink notification is gated per action and by the master switch."""
+    print("Testing the blink notification switches...")
+    import tempfile
+    import jobs.home_assistant_blink as hd
+
+    with tempfile.TemporaryDirectory() as tmp:
+        switch_file = Path(tmp) / "notify_switches.json"
+        with mock.patch.object(hd, "SWITCH_FILE", switch_file), \
+                mock.patch.object(hd, "set_alarm", return_value={"status": "success"}) as alarm, \
+                mock.patch.object(hd, "notify_phone", return_value={"status": "success"}) as sent, \
+                mock.patch.object(hd, "load_event_text", return_value={}), \
+                mock.patch.object(hd, "write_log"):
+            # An action nobody has toggled yet is on, and auto-registers.
+            hd.arm()
+            assert sent.call_count == 1, sent.call_count
+            assert hd.all_notify_enabled() == {"arm": True}, hd.all_notify_enabled()
+
+            # Disabling one action silences it but still moves the panel.
+            hd.set_notify_enabled_for("arm", False)
+            sent.reset_mock()
+            alarm.reset_mock()
+            res = hd.arm()
+            assert sent.call_count == 0, "a disabled switch still notified"
+            assert res["notify"]["status"] == "skipped", res
+            alarm.assert_called_once_with("arm", home=ps.DEFAULT_HOME)
+
+            # The other action is unaffected.
+            hd.disarm()
+            assert sent.call_count == 1, sent.call_count
+
+            # The master switch silences both.
+            hd.set_notify_enabled_for("arm", True)
+            sent.reset_mock()
+            with mock.patch.object(hd, "master_enabled", return_value=False):
+                res = hd.arm()
+                assert sent.call_count == 0, "master switch off but still notified"
+                assert res["notify"]["status"] == "skipped", res
+                assert hd.MASTER_SWITCH in res["notify"]["message"], res
+    print("  OK: per-action and master switches gate the notification, not the panel")
+
+
+def test_notify_switches_file_is_shared():
+    """Location and blink switches live in one file, in their own sections."""
+    print("Testing the shared notify_switches.json...")
+    import jobs.home_assistant_blink as hd
+    import jobs.location_notify as ln
+
+    assert hd.SWITCH_FILE == ln.SWITCH_FILE, (hd.SWITCH_FILE, ln.SWITCH_FILE)
+    assert hd.SWITCH_FILE.name == "notify_switches.json", hd.SWITCH_FILE
+    assert hd.SWITCH_SECTION == "blink_control", hd.SWITCH_SECTION
+    # The location section is named after its notify_config.json event.
+    assert ln.SWITCH_SECTION == ln.EVENT == "location_log", ln.SWITCH_SECTION
+    # Both share the one master switch.
+    assert hd.MASTER_SWITCH == ln.MASTER_SWITCH == "notify_phone"
+
+    # The shipped file has both sections.
+    shipped = json.loads(
+        (Path(__file__).parent.parent / "configs" / "notify_switches.json").read_text())
+    assert "location_log" in shipped, shipped
+    assert shipped["blink_control"] == {"arm": True, "disarm": True}, shipped
+    print("  OK: one file, two sections, one master switch")
+
+
+def test_ha_feature_switches_gate_both_integrations():
+    """home_assistant_switches.json decides whether we talk to HA at all."""
+    print("Testing the Home Assistant feature switches...")
+    import jobs.home_assistant_blink as hd
+    import jobs.home_assistant_switches as hs
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ha_file = Path(tmp) / "home_assistant_switches.json"
+        with mock.patch.object(hs, "SWITCH_FILE", ha_file):
+            # Unknown features count as on and auto-register.
+            assert hs.enabled_for(hs.BLINK) is True
+            assert hs.enabled_for(hs.NOTIFY) is True
+
+            # blink off -> no panel request, and load_config never called.
+            hs.set_enabled_for(hs.BLINK, False)
+            with mock.patch.object(hd, "load_config") as load, \
+                    mock.patch.object(hd.requests, "post") as post:
+                res = hd.set_alarm("arm")
+                assert res["status"] == "skipped", res
+                assert hs.BLINK in res["message"], res
+                load.assert_not_called()   # off before the config is even read
+                post.assert_not_called()
+
+            # notify off -> no notification request, config never read.
+            hs.set_enabled_for(hs.NOTIFY, False)
+            with mock.patch.object(han, "_load_ha_config") as load, \
+                    mock.patch.object(han.requests, "post") as post:
+                res = han.notify_phone("T", "M")
+                assert res["status"] == "skipped", res
+                assert hs.NOTIFY in res["message"], res
+                load.assert_not_called()
+                post.assert_not_called()
+
+            # The two are independent: alarm back on, notify still off.
+            hs.set_enabled_for(hs.BLINK, True)
+            with mock.patch.object(hd, "load_config", return_value=FAKE_HA_CONFIG), \
+                    mock.patch.object(hd, "panel_entity",
+                                      return_value="alarm_control_panel.test"), \
+                    mock.patch.object(hd, "write_log"), \
+                    mock.patch.object(hd.requests, "post",
+                                      return_value=mock.Mock(status_code=200, text="{}")) as post:
+                assert hd.set_alarm("arm")["status"] == "success"
+                post.assert_called_once()
+            with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG):
+                assert han.notify_phone("T", "M")["status"] == "skipped"
+
+            # An invalid action is still an error, not silently skipped.
+            hs.set_enabled_for(hs.BLINK, False)
+            try:
+                hd.set_alarm("explode")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected ValueError for a bad action")
+    print("  OK: each HA feature gates its own integration, before config is read")
+
+
+def test_ha_notify_switch_covers_every_notification():
+    """The notify feature switch reaches every notifying job at once."""
+    print("Testing that the HA notify switch covers all callers...")
+    import jobs.home_assistant_blink as hd
+    import jobs.home_assistant_switches as hs
+    import jobs.location_notify as ln
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ha_file = Path(tmp) / "home_assistant_switches.json"
+        notify_file = Path(tmp) / "notify_switches.json"
+        # Every switch file is redirected, so nothing is written to the repo.
+        with mock.patch.object(hs, "SWITCH_FILE", ha_file), \
+                mock.patch.object(ln, "SWITCH_FILE", notify_file), \
+                mock.patch.object(hd, "SWITCH_FILE", notify_file), \
+                temp_presence_file(), \
+                mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+                mock.patch.object(han.requests, "post") as post, \
+                mock.patch.object(np, "set_alarm", return_value={"status": "skipped"}), \
+                mock.patch.object(hd, "set_alarm", return_value={"status": "skipped"}), \
+                mock.patch.object(np, "write_log"), mock.patch.object(hd, "write_log"):
+            hs.set_enabled_for(hs.NOTIFY, False)
+
+            # leaving/arriving, the blink webhooks, and a logged position.
+            assert np.leaving_home({"id": "Alex"})["notify"]["status"] == "skipped"
+            assert np.arriving_home({"id": "Alex"})["notify"]["status"] == "skipped"
+            assert hd.arm()["notify"]["status"] == "skipped"
+            assert hd.disarm()["notify"]["status"] == "skipped"
+            entry = {"latitude": 1.0, "longitude": 2.0, "time": "now"}
+            assert ln.notify_location("Alex", entry)["status"] == "skipped"
+
+            post.assert_not_called()  # not one HTTP request from any of them
+    print("  OK: one switch silences leaving/arriving, blink, and location")
+
+
+def test_entity_references():
+    """Entity ids come from home_assistant_entities.json, and nowhere else."""
+    print("Testing entity references...")
+    import jobs.home_assistant_blink as hd
+
+    with tempfile.TemporaryDirectory() as tmp:
+        entities = Path(tmp) / "home_assistant_entities.json"
+
+        with mock.patch.object(he, "CONFIG_FILE", str(entities)):
+            entities.write_text(json.dumps({
+                "blink": {
+                    "panel_AMS": "alarm_control_panel.ams",
+                    "panel_M": "alarm_control_panel.cabin",
+                },
+                "notify": {"target": "mobile_app_phone"},
+                "lutron": {"lights": {"k": "light.k"}, "scenes": {}},
+            }), encoding="utf-8")
+
+            # The panel key carries the home name, defaulting to DEFAULT_HOME.
+            assert hd.panel_entity() == "alarm_control_panel.ams"
+            assert hd.panel_entity("M") == "alarm_control_panel.cabin"
+            assert han.notify_target() == "mobile_app_phone"
+            assert he.aliases("lutron", "lights") == {"k": "light.k"}
+
+            # A home with no panel is a clear error naming the key it wanted.
+            try:
+                hd.panel_entity("nowhere")
+            except ValueError as e:
+                assert "panel_nowhere" in str(e), e
+                assert "home_assistant_entities.json" in str(e), e
+            else:
+                raise AssertionError("expected ValueError for an unconfigured home")
+
+            # Nothing falls back to the old home_assistant_config.json keys.
+            entities.write_text(json.dumps({"blink": {}, "notify": {}}), encoding="utf-8")
+            assert not hasattr(he, "LEGACY_CONFIG_FILE"), "legacy fallback still present"
+            for call in (hd.panel_entity, han.notify_target):
+                try:
+                    call()
+                except ValueError as e:
+                    assert "home_assistant_entities.json" in str(e), e
+                    assert "HA_ENTITY_ID" not in str(e) and "HA_NOTIFY_TARGET" not in str(e), e
+                else:
+                    raise AssertionError(f"expected ValueError from {call.__name__}")
+
+            # A malformed entities file is not fatal.
+            entities.write_text("{not json", encoding="utf-8")
+            assert he.load_entities() == {}
+            assert he.aliases("lutron", "lights") == {}
+    print("  OK: panel keyed per home, no legacy fallback anywhere")
+
+def test_connection_config_no_longer_demands_entities():
+    """HA_ENTITY_ID / HA_NOTIFY_TARGET are no longer required config fields."""
+    print("Testing the slimmed connection config...")
+    import jobs.home_assistant_api as ha_api
+    import jobs.home_assistant_blink as hd
+
+    assert ha_api.REQUIRED_FIELDS == ("HA_BASE_URL", "HA_API_KEY"), ha_api.REQUIRED_FIELDS
+
+    # Both loaders accept a config holding only the connection fields.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "home_assistant_config.json"
+        path.write_text(json.dumps(FAKE_HA_CONFIG), encoding="utf-8")
+        with mock.patch.object(hd, "os") as fake_os:
+            fake_os.path.join.return_value = str(path)
+            fake_os.path.dirname.return_value = tmp
+            assert hd.load_config() == FAKE_HA_CONFIG
+        with mock.patch.object(han, "CONFIG_FILE", str(path)):
+            assert han._load_ha_config() == FAKE_HA_CONFIG
+
+    # And the shipped example no longer advertises them.
+    example = json.loads(
+        (Path(__file__).parent.parent / "configs"
+         / "home_assistant_config.example.json").read_text())
+    assert set(example) == {"HA_BASE_URL", "HA_API_KEY"}, example
+
+    # The shipped entities file uses the per-home panel key.
+    entities = json.loads(
+        (Path(__file__).parent.parent / "configs"
+         / "home_assistant_entities.json").read_text())
+    assert f"panel_{ps.DEFAULT_HOME}" in entities["blink"], entities["blink"]
+    print("  OK: connection config is URL + token only")
+
+
+def test_panel_is_routed_per_home():
+    """Each home arms its own panel, from blink.panel_<home>."""
+    print("Testing per-home panel routing...")
+    import jobs.home_assistant_blink as hd
+
+    with tempfile.TemporaryDirectory() as tmp:
+        entities = Path(tmp) / "home_assistant_entities.json"
+        entities.write_text(json.dumps({
+            "blink": {
+                f"panel_{ps.DEFAULT_HOME}": "alarm_control_panel.ams",
+                "panel_M": "alarm_control_panel.cabin",
+            },
+            "notify": {"target": FAKE_TARGET},
+        }), encoding="utf-8")
+
+        def entity_of(post):
+            return post.call_args[1]["json"]["entity_id"]
+
+        with temp_presence_file(), \
+                mock.patch.object(he, "CONFIG_FILE", str(entities)), \
+                mock.patch.object(hd, "load_config", return_value=FAKE_HA_CONFIG), \
+                mock.patch.object(hd.requests, "post",
+                                  return_value=mock.Mock(status_code=200, text="{}")) as post, \
+                mock.patch.object(hd, "_notify_blink", return_value={"status": "skipped"}), \
+                mock.patch.object(np, "notify_phone", return_value={"status": "success"}), \
+                mock.patch.object(np, "write_log"), mock.patch.object(hd, "write_log"):
+
+            # /webhook/blink/* honours an optional "home".
+            res = hd.arm({"home": "M"})
+            assert entity_of(post) == "alarm_control_panel.cabin", post.call_args
+            assert res["home"] == "M", res
+
+            hd.disarm({})                      # no home -> the default
+            assert entity_of(post) == "alarm_control_panel.ams", post.call_args
+
+            # leaving/arriving arm the panel of the home the event belongs to.
+            post.reset_mock()
+            res = np.leaving_home({"id": "Sam", "home": "M", "arm": True})
+            assert entity_of(post) == "alarm_control_panel.cabin", post.call_args
+            assert res["alarm"]["status"] == "success", res
+
+            res = np.arriving_home({"id": "Alex", "disarm": True})   # default home
+            assert entity_of(post) == "alarm_control_panel.ams", post.call_args
+
+            # The legacy run() handler routes too.
+            hd.run({"action": "arm", "home": "M"})
+            assert entity_of(post) == "alarm_control_panel.cabin", post.call_args
+
+            # A home with no panel is an error, and arms nothing.
+            post.reset_mock()
+            res = hd.arm({"home": "nowhere"})
+            assert res["status"] == "error", res
+            assert "panel_nowhere" in res["message"], res
+            assert post.call_count == 0, "an unconfigured home still armed a panel"
+
+            # ...and through leaving/arriving it is reported, not raised.
+            res = np.leaving_home({"id": "Sam", "home": "nowhere", "arm": True})
+            assert res["alarm"]["status"] == "error", res
+            assert "panel_nowhere" in res["alarm"]["message"], res
+    print("  OK: each home arms its own panel; an unknown home arms nothing")
 
 
 def test_presence_is_persisted_per_person():
@@ -438,6 +864,17 @@ if __name__ == "__main__":
     test_per_home_arm_flag()
     test_notify_persists_presence_in_the_named_home()
     test_odd_homes_block_falls_back()
+    test_blink_webhooks_notify_the_phone()
+    test_blink_notification_names_the_home()
+    test_blink_notification_survives_a_broken_panel()
+    test_leaving_arriving_send_exactly_one_notification()
+    test_blink_notify_switches()
+    test_notify_switches_file_is_shared()
+    test_ha_feature_switches_gate_both_integrations()
+    test_ha_notify_switch_covers_every_notification()
+    test_entity_references()
+    test_connection_config_no_longer_demands_entities()
+    test_panel_is_routed_per_home()
     test_presence_is_persisted_per_person()
     test_presence_store_survives_a_corrupt_file()
     print("\nAll notifyPhone tests passed!")

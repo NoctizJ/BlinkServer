@@ -9,12 +9,12 @@ Every log has a *type* (an arbitrary string). If the type is ``None`` (or
 empty) the ``DEFAULT_TYPE`` is used instead. Whether a log is actually
 written is gated by two switches:
 
-  * The master ``"log"`` switch in ``job_config.json`` — turns ALL logging
+  * The master ``"log"`` switch in ``job_switches.json`` — turns ALL logging
     on/off. This is the master switch for every log type.
-  * A per-type switch in ``log_config.json`` — turns a single type on/off.
+  * A per-type switch in ``log_switches.json`` — turns a single type on/off.
 
 A log entry is only written when BOTH switches are enabled. The first time a
-new type is seen it is auto-registered in ``log_config.json`` (enabled by
+new type is seen it is auto-registered in ``log_switches.json`` (enabled by
 default) so it can be toggled on/off later.
 
 Usage:
@@ -38,8 +38,8 @@ except ImportError:  # pragma: no cover - allows running this file directly
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = REPO_ROOT / "logs"
 
-JOB_CONFIG_PATH = REPO_ROOT / "configs" / "job_config.json"
-LOG_CONFIG_PATH = REPO_ROOT / "configs" / "log_config.json"
+JOB_SWITCHES_PATH = REPO_ROOT / "configs" / "job_switches.json"
+LOG_SWITCHES_PATH = REPO_ROOT / "configs" / "log_switches.json"
 
 # Fallback type used when a caller passes None / an empty type.
 DEFAULT_TYPE = "default"
@@ -52,10 +52,10 @@ TYPE_LOG_FILES = {
     UPLOAD_TYPE: "upload.log",
 }
 
-# Key inside job_config.json["jobs"] that acts as the master log switch.
+# Key inside job_switches.json["jobs"] that acts as the master log switch.
 MASTER_SWITCH = "log"
 
-# Section of log_config.json holding the per-type switches.
+# Section of log_switches.json holding the per-type switches.
 TYPES_SECTION = "types"
 
 # Pretty separators drawn around each entry.
@@ -77,13 +77,13 @@ def _normalize_type(log_type):
 
 def load_log_config():
     """Load per-type log configuration, falling back to a sane default."""
-    return load_switches(LOG_CONFIG_PATH, TYPES_SECTION,
+    return load_switches(LOG_SWITCHES_PATH, TYPES_SECTION,
                          fallback={TYPES_SECTION: {DEFAULT_TYPE: True}, "last_modified": None})
 
 
 def save_log_config(config):
     """Persist per-type log configuration, stamping the modification time."""
-    save_switches(LOG_CONFIG_PATH, config)
+    save_switches(LOG_SWITCHES_PATH, config)
 
 
 def get_type_enabled_status(log_type):
@@ -97,22 +97,22 @@ def set_type_status(log_type, enabled):
     Returns the normalized type name that was written.
     """
     log_type = _normalize_type(log_type)
-    set_enabled(LOG_CONFIG_PATH, TYPES_SECTION, log_type, enabled)
+    set_enabled(LOG_SWITCHES_PATH, TYPES_SECTION, log_type, enabled)
     return log_type
 
 
 def _master_switch_enabled():
-    """Return the master log switch from job_config.json (defaults to on)."""
-    return master_enabled(MASTER_SWITCH, JOB_CONFIG_PATH)
+    """Return the master log switch from job_switches.json (defaults to on)."""
+    return master_enabled(MASTER_SWITCH, JOB_SWITCHES_PATH)
 
 
 def _type_enabled(log_type):
     """Return whether a given type is enabled.
 
     Unknown types are auto-registered (enabled) so they show up in
-    log_config.json and can be toggled off later.
+    log_switches.json and can be toggled off later.
     """
-    return is_enabled(LOG_CONFIG_PATH, TYPES_SECTION, log_type)
+    return is_enabled(LOG_SWITCHES_PATH, TYPES_SECTION, log_type)
 
 
 def _log_file_for(log_type):

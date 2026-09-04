@@ -1,0 +1,16 @@
+{
+  "blink": {
+    "panel_AMS": "alarm_control_panel.blink_armstrong"
+  },
+  "notify": {
+    "target": "mobile_app_aisingioro"
+  },
+  "lutron": {
+    "lights": {},
+    "scenes": {}
+  },
+  "speak": {
+    "tts": "tts.google_en_com",
+    "speakers": {}
+  }
+}

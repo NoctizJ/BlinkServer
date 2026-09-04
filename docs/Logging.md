@@ -70,8 +70,8 @@ The response includes `written: true|false`.
 
 A line is written only when **both** switches are on:
 
-1. **Master switch** — the `log` job in `configs/job_config.json`. Turns *all* logging on/off.
-2. **Per-type switch** — an entry under `types` in `configs/log_config.json`. Turns a single type on/off.
+1. **Master switch** — the `log` job in `configs/job_switches.json`. Turns *all* logging on/off.
+2. **Per-type switch** — an entry under `types` in `configs/log_switches.json`. Turns a single type on/off.
 
 | Master (`log`) | Type | Result     |
 | -------------- | ---- | ---------- |
@@ -79,12 +79,12 @@ A line is written only when **both** switches are on:
 | on             | off  | suppressed |
 | off            | any  | suppressed |
 
-New types are auto-registered in `configs/log_config.json` (enabled) the first time they
+New types are auto-registered in `configs/log_switches.json` (enabled) the first time they
 are logged, so you can toggle them off afterwards.
 
 ### Config files
 
-`configs/job_config.json` — the master switch lives beside the other jobs:
+`configs/job_switches.json` — the master switch lives beside the other jobs:
 
 ```json
 {
@@ -94,7 +94,7 @@ are logged, so you can toggle them off afterwards.
 }
 ```
 
-`configs/log_config.json` — one flag per type:
+`configs/log_switches.json` — one flag per type:
 
 ```json
 {

@@ -23,12 +23,12 @@ def _setup_temp_env():
     """Redirect the engine at a fresh temp dir with both switches on."""
     tmp = Path(tempfile.mkdtemp(prefix="blink_log_test_"))
     log_engine.LOGS_DIR = tmp
-    log_engine.LOG_CONFIG_PATH = tmp / "log_config.json"
-    log_engine.JOB_CONFIG_PATH = tmp / "job_config.json"
+    log_engine.LOG_SWITCHES_PATH = tmp / "log_switches.json"
+    log_engine.JOB_SWITCHES_PATH = tmp / "job_switches.json"
 
     # Master switch ON, plus two known types enabled.
-    log_engine.JOB_CONFIG_PATH.write_text(json.dumps({"jobs": {"log": True}}))
-    log_engine.LOG_CONFIG_PATH.write_text(
+    log_engine.JOB_SWITCHES_PATH.write_text(json.dumps({"jobs": {"log": True}}))
+    log_engine.LOG_SWITCHES_PATH.write_text(
         json.dumps({"types": {"default": True, "blink": True}})
     )
     return tmp
@@ -41,7 +41,7 @@ def _read(log_type):
 
 
 def _types():
-    return json.loads(log_engine.LOG_CONFIG_PATH.read_text())["types"]
+    return json.loads(log_engine.LOG_SWITCHES_PATH.read_text())["types"]
 
 
 def test_default_type():
@@ -98,7 +98,7 @@ def test_routing_by_type():
 
 
 def test_auto_register_new_type():
-    """An unseen type is auto-added to log_config.json, enabled."""
+    """An unseen type is auto-added to log_switches.json, enabled."""
     _setup_temp_env()
     assert "camera" not in _types()
     log_engine.log("camera", "new type")
@@ -118,7 +118,7 @@ def test_type_switch_off():
 def test_master_switch_off():
     """The master switch suppresses every type."""
     tmp = _setup_temp_env()
-    (tmp / "job_config.json").write_text(json.dumps({"jobs": {"log": False}}))
+    (tmp / "job_switches.json").write_text(json.dumps({"jobs": {"log": False}}))
     assert log_engine.log("default", "master off") is False
     assert "master off" not in _read("default")
     print("✅ test_master_switch_off")
@@ -159,14 +159,14 @@ def test_read_log_whole_and_missing():
 def test_read_not_gated_by_switches():
     """Reading must work even when the master and per-type switches are OFF.
 
-    Writes are gated by job_config (master 'log') and log_config (per type);
+    Writes are gated by job_switches (master 'log') and log_switches (per type);
     reads are not — you can always retrieve what's already on disk.
     """
     tmp = _setup_temp_env()
     log_engine.log("blink", "recorded while enabled")
 
     # Turn OFF the master switch and disable the blink type.
-    (tmp / "job_config.json").write_text(json.dumps({"jobs": {"log": False}}))
+    (tmp / "job_switches.json").write_text(json.dumps({"jobs": {"log": False}}))
     log_engine.set_type_status("blink", False)
 
     # New writes are now suppressed...

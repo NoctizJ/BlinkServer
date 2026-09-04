@@ -10,16 +10,22 @@ Two switches gate it, the same two-level shape the logging engine uses (see
 :mod:`jobs.switches`):
 
   * the **master** switch — the ``notify_phone`` entry in
-    ``configs/job_config.json``, shared with the ``/webhook/notify/*`` webhooks,
+    ``configs/job_switches.json``, shared with the ``/webhook/notify/*`` webhooks,
     so ``POST /jobs/notify_phone/disable`` silences every phone notification
     this server sends;
-  * a **per-person** switch — one entry per id in
-    ``configs/location_notify_config.json``::
+  * a **per-person** switch — one entry per id in the ``location_log`` section of
+    ``configs/notify_switches.json``::
 
         {
-          "ids": { "娜": true, "Alex": false },
+          "location_log": { "娜": true, "Alex": false },
+          "blink_control": { "arm": true, "disarm": true },
           "last_modified": "2026-08-18 21:04:11.221"
         }
+
+The section is named after this notification's event, so it matches the entry
+holding its text in ``notify_config.json``. ``notify_switches.json`` is the one
+place every phone notification's on/off switches live; the ``blink_control``
+section beside it belongs to :mod:`jobs.home_assistant_blink`.
 
 Both must be on for a notification to go out. A person nobody has toggled yet is
 auto-registered as enabled the first time they log a position, so they show up in
@@ -62,16 +68,17 @@ except ImportError:  # pragma: no cover - allows running this file directly
 
 logger = logging.getLogger(__name__)
 
-# The per-person switches: configs/location_notify_config.json, "ids" section.
-SWITCH_FILE = REPO_ROOT / "configs" / "location_notify_config.json"
-IDS_SECTION = "ids"
-
-# The job whose job_config.json entry is the master switch for every phone
-# notification, shared with jobs/notify_phone.py.
-MASTER_SWITCH = "notify_phone"
-
 # The notify_config.json key holding this notification's title and message.
 EVENT = "location_log"
+
+# The per-person switches: configs/notify_switches.json, section named after the
+# event above so the text and its switch line up.
+SWITCH_FILE = REPO_ROOT / "configs" / "notify_switches.json"
+SWITCH_SECTION = EVENT
+
+# The job whose job_switches.json entry is the master switch for every phone
+# notification, shared with jobs/notify_phone.py.
+MASTER_SWITCH = "notify_phone"
 
 # Used when notify_config.json has no "location_log" entry. `message_with_trigger`
 # is used instead of `message` when the logged position carries a trigger, so the
@@ -85,19 +92,19 @@ DEFAULT_TEXT = {
 
 def enabled_for(person: str) -> bool:
     """Return whether ``person``'s notifications are on, registering new people."""
-    return is_enabled(SWITCH_FILE, IDS_SECTION, person)
+    return is_enabled(SWITCH_FILE, SWITCH_SECTION, person)
 
 
 def set_enabled_for(person: str, enabled: bool) -> bool:
     """Turn ``person``'s notifications on or off; returns the value written."""
     logger.info("Location notifications for %s %s", person,
                 "enabled" if enabled else "disabled")
-    return set_enabled(SWITCH_FILE, IDS_SECTION, person, enabled)
+    return set_enabled(SWITCH_FILE, SWITCH_SECTION, person, enabled)
 
 
 def all_enabled() -> Dict[str, bool]:
     """Return every person's switch, keyed by id."""
-    return all_switches(SWITCH_FILE, IDS_SECTION)
+    return all_switches(SWITCH_FILE, SWITCH_SECTION)
 
 
 def _first_text(source: Dict[str, Any], fields: tuple) -> Optional[str]:

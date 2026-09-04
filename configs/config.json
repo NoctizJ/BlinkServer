@@ -8,13 +8,13 @@
     },
     {
       "path": "/webhook/blink/arm",
-      "module": "jobs.home_assistant_arm_disarm",
+      "module": "jobs.home_assistant_blink",
       "function": "arm",
       "require_secret": true
     },
     {
       "path": "/webhook/blink/disarm",
-      "module": "jobs.home_assistant_arm_disarm",
+      "module": "jobs.home_assistant_blink",
       "function": "disarm",
       "require_secret": true
     },
@@ -75,6 +75,54 @@
     {
       "path": "/webhook/location/purge",
       "module": "jobs.location_webhook",
+      "function": "purge",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/lutron/light",
+      "module": "jobs.home_assistant_lutron",
+      "function": "light",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/lutron/scene",
+      "module": "jobs.home_assistant_lutron",
+      "function": "scene",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/lutron/sos",
+      "module": "jobs.home_assistant_lutron",
+      "function": "sos",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/lutron/status",
+      "module": "jobs.home_assistant_lutron",
+      "function": "status",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/ha",
+      "module": "jobs.home_assistant_speak",
+      "function": "speak",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/airplay",
+      "module": "jobs.airplay_speak",
+      "function": "speak",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/upload",
+      "module": "jobs.airplay_speak",
+      "function": "upload",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/speak/purge",
+      "module": "jobs.airplay_speak",
       "function": "purge",
       "require_secret": true
     }

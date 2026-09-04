@@ -14,6 +14,17 @@ server code.
 - File uploads (photos/videos/files) via a form-body webhook — see [Uploads.md](docs/Uploads.md)
 - Per-person home/away presence, persisted in `state/presence.json` and readable
   over HTTP (`/webhook/presence/read`)
+- Lutron light and scene control through Home Assistant — on/off/toggle, brightness
+  percentage, and scene activation, with friendly aliases — see [Lutron](#lutron)
+- **SOS** blinker for any Lutron light or switch — on/off in real seconds, run in
+  the background, always ending off — see [SOS](#sos)
+- Lutron **light status report** — every configured light's state and brightness
+  in one request — see [Light status](#light-status)
+- **Text-to-speech, two ways** — via Home Assistant, or straight to a HomePod over
+  AirPlay with no Home Assistant at all — see [Speak](#speak) and
+  [Speak (AirPlay)](#speak-airplay)
+- Home Assistant integration switchable by feature — turn the alarm panel, the phone
+  notifications, or Lutron off entirely without touching config — see [Switches](#switches)
 - Multiple homes — an optional `home` field on the leaving/arriving and presence
   webhooks keeps a separate household, with its own notification text, in each
   house; omit it and everything lands in the default home `AMS` — see
@@ -44,15 +55,38 @@ Fill in your values:
 ```json
 {
     "HA_BASE_URL": "http://localhost:8123",
-    "HA_API_KEY": "your_home_assistant_long_lived_access_token",
-    "HA_ENTITY_ID": "alarm_control_panel.blink_NAME"
+    "HA_API_KEY": "your_home_assistant_long_lived_access_token"
 }
 ```
 
 > `configs/home_assistant_config.json` holds a secret token and is gitignored — never commit it.
 
-`HA_NOTIFY_TARGET` (e.g. `mobile_app_aisingioro`) is only needed for the phone
-notification webhooks (`/webhook/notify/*`); it names the Home Assistant
+Which *entities* to act on live separately, in the tracked
+**`configs/home_assistant_entities.json`** — an entity id is a name, not a
+credential, so keeping it out of the gitignored file means it survives a fresh
+clone and shows up in diffs:
+
+```json
+{
+    "blink":  { "panel_AMS": "alarm_control_panel.blink_NAME" },
+    "notify": { "target":    "mobile_app_YOUR_PHONE" },
+    "lutron": {
+        "lights": { "kitchen": "light.kitchen_main" },
+        "scenes": { "movie":   "scene.movie_night" }
+    }
+}
+```
+
+Its sections are named after the Home Assistant features in
+[Switches](#switches), so the two files line up.
+
+Keys that differ per house carry the **home name**, using the same names as
+`state/presence.json` — so the default home `AMS` has `panel_AMS`, and a second
+house `M` adds `panel_M` beside it. One phone is shared by every home, so
+`notify.target` carries no home name.
+
+The `notify.target` entry (e.g. `mobile_app_aisingioro`) is only needed for the
+phone notification webhooks (`/webhook/notify/*`); it names the Home Assistant
 `notify` service target for your phone. The notification titles and messages are
 configurable in **`configs/notify_config.json`**, which also controls whether each
 event arms/disarms the alarm panel:
@@ -75,6 +109,10 @@ event arms/disarms the alarm panel:
   message, and arm/disarm flag, and `{home}` is replaced with the home's name —
   see [Multiple homes](#multiple-homes). `configs/notify_config.example.json`
   shows the shape.
+- The `blink_arm` / `blink_disarm` events hold the text for the notification
+  `/webhook/blink/*` sends. They take `{home}` (naming the house whose panel
+  changed) and default to `Blink Control {home} (A)` / `(D)`. There is no person
+  involved in arming a panel, so `{id}` is not offered there.
 - Every title also ends in an **arm/disarm postfix** — see
   [Arm/disarm postfix](#armdisarm-postfix).
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
@@ -278,10 +316,12 @@ Presence — 3 people across 2 homes
 
 Notes and limits:
 
-- **All homes share one alarm panel and one phone.** `HA_ENTITY_ID` and
-  `HA_NOTIFY_TARGET` are not per-home, so a home-M arrival with `disarm: true`
-  disarms the same panel as home AMS. Only the text and the bookkeeping are
-  per-home.
+- **Each home arms its own panel.** The panel comes from `blink.panel_<home>` in
+  `home_assistant_entities.json`, so a home-M event with `disarm: true` disarms
+  `panel_M`. A home with no `panel_<home>` entry is an **error** — it never falls
+  back to another house's panel.
+- **Every home notifies the same phone.** `notify.target` carries no home name,
+  so the notification text is per-home but the destination is not.
 - **`all` is a reserved home name.** It is how a read asks for every house
   (matched case-insensitively), so writing to it is rejected.
 - **Home names are case-sensitive and created on first write.** `{"home": "m"}`
@@ -328,8 +368,8 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 
 | Method | Path                          | Description                        |
 | ------ | ----------------------------- | ---------------------------------- |
-| POST   | `/webhook/blink/arm`          | Arm the alarm panel                |
-| POST   | `/webhook/blink/disarm`       | Disarm the alarm panel             |
+| POST   | `/webhook/blink/arm`          | Arm a home's alarm panel + notify your phone; `{"home": "<home>"}` |
+| POST   | `/webhook/blink/disarm`       | Disarm a home's alarm panel + notify your phone; `{"home": "<home>"}` |
 | POST   | `/webhook/log`                | Write a log entry (see [Logging.md](docs/Logging.md)) |
 | POST   | `/webhook/upload`             | Upload files, multipart/form-data (see [Uploads.md](docs/Uploads.md)) 🔒 |
 | POST   | `/webhook/notify/leaving`     | Arm the panel (optional) + notify you're leaving home; `{"id": "<person>", "home": "<home>"}` 🔒 |
@@ -343,10 +383,26 @@ ports, see [Tailscale-Setup.md](docs/Tailscale-Setup.md).
 | POST   | `/webhook/location/purge`     | Trim history to `records` (default 10) or `days` 🔒 |
 | GET    | `/location`                   | Read back a person's last location as JSON; `?id=`, `?n=` 🔒 |
 | GET    | `/location/history`           | Read a person's location history as text; `?id=`, `?n=` 🔒 |
+| POST   | `/webhook/lutron/light`       | Turn a Lutron light on/off/toggle, set brightness % (see [Lutron](#lutron)) 🔒 |
+| POST   | `/webhook/lutron/scene`       | Activate a Lutron scene 🔒 |
+| POST   | `/webhook/lutron/status`      | Report every configured light's state and brightness (see [Light status](#light-status)) 🔒 |
+| POST   | `/webhook/speak/ha`           | Say a message via Home Assistant (see [Speak](#speak)) 🔒 |
+| POST   | `/webhook/speak/airplay`      | Say a message, or play a file from `audio/`, on an AirPlay speaker (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
+| POST   | `/webhook/speak/upload`       | Upload an audio file to `audio/` and play it (see [Speak (AirPlay)](#speak-airplay)) 🔒 |
+| POST   | `/webhook/speak/purge`        | Trim `audio/` to the N most recent **synthesized** recordings 🔒 |
+| POST   | `/webhook/lutron/sos`         | Blink a light on/off as an SOS signal, ending off (see [SOS](#sos)) 🔒 |
 | GET    | `/location/notify`            | List each person's location-notification switch 🔒 |
 | POST   | `/location/notify/{id}/enable`  | Notify this person's logged positions 🔒 |
 | POST   | `/location/notify/{id}/disable` | Stop notifying for this person 🔒 |
 | POST   | `/location/notify/{id}/toggle`  | Flip this person's notification switch 🔒 |
+| GET    | `/blink/notify`               | List the arm/disarm notification switches 🔒 |
+| GET    | `/ha`                         | List the Home Assistant feature switches 🔒 |
+| POST   | `/ha/{feature}/enable`        | Use this HA feature (`blink`/`notify`/`lutron`/`speak`) 🔒 |
+| POST   | `/ha/{feature}/disable`       | Stop using this HA feature entirely 🔒 |
+| POST   | `/ha/{feature}/toggle`        | Flip this HA feature switch 🔒 |
+| POST   | `/blink/notify/{action}/enable`  | Notify on this blink action (`arm`/`disarm`) 🔒 |
+| POST   | `/blink/notify/{action}/disable` | Stop notifying on this blink action 🔒 |
+| POST   | `/blink/notify/{action}/toggle`  | Flip this blink action's notification switch 🔒 |
 | GET    | `/jobs`                       | List jobs and their status         |
 | POST   | `/jobs/{job_name}/enable`     | Enable a job 🔒                     |
 | POST   | `/jobs/{job_name}/disable`    | Disable a job 🔒                    |
@@ -373,6 +429,17 @@ curl -X POST http://localhost:5050/webhook/blink/arm \
 # Disarm
 curl -X POST http://localhost:5050/webhook/blink/disarm \
   -H "X-Webhook-Secret: your-shared-secret-here"
+
+# Arming/disarming also notifies your phone. Its title/message come from
+# configs/notify_config.json under "blink_arm"/"blink_disarm", and each action has
+# an on/off switch in configs/notify_switches.json ("blink_control").
+# An optional "home" picks which panel: blink.panel_<home> in
+# configs/home_assistant_entities.json. Omit it for the default home.
+curl -X POST http://localhost:5050/webhook/blink/arm \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"home": "M"}'
+
 
 # Notify your phone (title/message default to configs/notify_config.json; override per request)
 # "id" names who left/arrived and is recorded in state/presence.json (defaults to "娜")
@@ -488,10 +555,10 @@ Every logged position also pushes a notification to your phone, through the same
 Home Assistant `notify` service the arrival/departure webhooks use. **Two
 switches** gate it, and both must be on:
 
-| Switch     | Where                                                     | Scope                                     |
-| ---------- | --------------------------------------------------------- | ----------------------------------------- |
-| master     | `configs/job_config.json` → `notify_phone`                 | every phone notification this server sends |
-| per person | `configs/location_notify_config.json` → `ids.<id>`         | one person's logged positions              |
+| Switch     | Where                                                          | Scope                                      |
+| ---------- | -------------------------------------------------------------- | ------------------------------------------ |
+| master     | `configs/job_switches.json` → `notify_phone`                   | every phone notification this server sends |
+| per person | `configs/notify_switches.json` → `location_log.<id>`           | one person's logged positions              |
 
 ```bash
 # Who is getting location notifications?
@@ -520,12 +587,13 @@ curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
 ```
 
 - A person nobody has toggled yet is **on**, and is written into
-  `location_notify_config.json` the first time they log a position — so they show
+  `notify_switches.json` the first time they log a position — so they show
   up in the listing and can be turned off. The file is created automatically:
 
   ```json
   {
-      "ids": { "Alex": true, "娜": false },
+      "location_log": { "Alex": true, "娜": false },
+      "blink_control": { "arm": true, "disarm": true },
       "last_modified": "2026-08-18 21:04:11.221"
   }
   ```
@@ -745,6 +813,739 @@ three actions:
 To log a position from the phone instead, use **Get Current Location** and POST
 its `Latitude` / `Longitude` to `/webhook/location/log`.
 
+## Lutron
+
+Control Lutron lights and scenes through Home Assistant. Home Assistant has no
+Lutron-specific API — both the `lutron` (RadioRA 2 / HomeWorks QS) and
+`lutron_caseta` (Caséta / RA3) integrations register ordinary entities, so this
+job calls the standard services:
+
+| Lutron device | HA entity | Service called |
+| ------------- | --------- | -------------- |
+| Dimmer | `light.*` | `light.turn_on` / `turn_off` / `toggle` |
+| Non-dim switch | `switch.*` | `switch.turn_on` / `turn_off` / `toggle` |
+| Scene / keypad button | `scene.*` | `scene.turn_on` |
+
+The service domain is taken from the **entity id itself**, not assumed — Lutron's
+non-dimming switches arrive as `switch.*` rather than `light.*`, and they cannot
+dim, so a brightness sent to one is an error rather than a silently dropped field.
+
+### Naming things
+
+Give an entity a short alias in the `lutron` section of
+**`configs/home_assistant_entities.json`**, or pass its full Home Assistant
+entity id. Anything containing a `.` is treated as an entity id, so both work and
+there is no mode flag:
+
+```json
+{
+    "lutron": {
+        "lights": {
+            "kitchen": "light.kitchen_main",
+            "living":  "light.living_room_dimmer",
+            "hallway": "switch.hallway_lights"
+        },
+        "scenes": {
+            "movie":     "scene.movie_night",
+            "goodnight": "scene.goodnight"
+        }
+    }
+}
+```
+
+Aliases keep entity ids in one place, so renaming something in Home Assistant is
+one config edit rather than a hunt through every Shortcut.
+`configs/home_assistant_entities.example.json` is a filled-in template. A missing
+or malformed file is not fatal — you lose the aliases, and raw entity ids still
+work.
+
+To list your own entity ids and the exact fields your Home Assistant accepts:
+
+```bash
+curl -s -H "Authorization: Bearer $HA_TOKEN" http://<hostID>:8123/api/states \
+  | python3 -c 'import json,sys; [print(e["entity_id"], "|", e["attributes"].get("friendly_name","")) for e in json.load(sys.stdin) if e["entity_id"].split(".")[0] in ("light","switch","scene","cover")]'
+```
+
+### Lights
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/light \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"light": "kitchen", "brightness": 40}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `light` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `state` | no | `on` / `off` / `toggle` (also JSON `true`/`false`); defaults to `on` |
+| `brightness` | no | **Percentage 0-100**, sent as HA's `brightness_pct`. Lights only |
+| `transition` | no | Fade time in seconds |
+
+```bash
+# All the shapes
+-d '{"light": "kitchen", "brightness": 40}'                    # on, at 40%
+-d '{"light": "kitchen", "state": "off", "transition": 2}'      # off over 2s
+-d '{"light": "kitchen", "state": "toggle"}'                    # flip it
+-d '{"light": "hallway", "state": "on"}'                        # a switch.* entity
+-d '{"light": "light.unlisted_lamp", "brightness": 100}'        # raw entity id
+```
+
+### Scenes
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/scene \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"scene": "movie"}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `scene` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `transition` | no | Fade time in seconds |
+
+**Home Assistant scenes cannot be turned off or toggled** — activating is the only
+thing a scene does. To undo one, activate another (a `goodnight` scene beside a
+`movie` scene). A `state` field on a scene request is ignored rather than an error.
+
+### Light status
+
+Report what Home Assistant currently says about every light in your `lutron`
+aliases, as a short text summary — one line per state, with each on light's
+brightness inline.
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/status \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" -d '{}'
+```
+
+```text
+Lutron lights — 4 lights
+----------------------------------
+On (2): dining (10%), living (40%)
+Off (1): kitchen
+Missing/unavailable (1): porch
+```
+
+It takes no fields. Alongside `message` (the summary above) the result carries the
+per-light detail — entity ids and friendly names live here rather than in the text:
+
+```json
+{"status": "ok", "count": 4,
+ "on": ["kitchen", "living"], "off": ["hallway"], "other": ["porch"],
+ "lights": {
+   "living": {"entity_id": "light.living_room_dimmer", "state": "on",
+              "brightness": "40%", "name": "Living Room"}
+ },
+ "message": "Lutron lights — 4 lights\n…"}
+```
+
+Notes:
+
+- **One request, however many lights.** Every alias is resolved from a single
+  `GET /api/states`, so the cost does not grow with your alias list.
+- **A stale alias shows up as `missing`** rather than being dropped — if you
+  renamed or recreated something in the Lutron app, this is where you will see it.
+  `unavailable` means Home Assistant knows the entity but cannot reach the device.
+- **Brightness is a percentage**, converted from the 0-255 Home Assistant reports,
+  and shown inline beside each on light. A switch has no brightness, so it appears
+  as a bare name with no parenthesis.
+- The `Missing/unavailable` line only appears when something is wrong, so a healthy
+  report is four lines.
+- Read-only: it never calls a service, so it cannot change a light.
+
+### SOS
+
+Blink a light or switch on and off as an attention signal. It always ends **off**.
+
+```bash
+curl -X POST http://localhost:5050/webhook/lutron/sos \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"light": "kitchen"}'
+```
+
+```json
+{"status": "started", "entity_id": "light.kitchen_main", "duration": 10.0,
+ "interval": 2.0, "brightness": 35.0, "calls": 6, "estimated_seconds": 10.0,
+ "message": "Blinking light.kitchen_main for 10s every 2s, ending off"}
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `light` | yes | An alias from `home_assistant_entities.json`, or a full entity id |
+| `duration` | no | Total seconds to blink for; default 10, range 2-300 |
+| `interval` | no | Seconds per on and per off; default 2, range 1-60 |
+| `brightness` | no | Level for each on-step, as a percentage; default 35, range 1-100. Lights only |
+
+The default is 10 seconds alternating every 2 seconds — three on, three off:
+
+```text
+ON  off ON  off ON  off
+ 2   2   2   2   2   0     seconds  (6 service calls, ends off)
+```
+
+**Why seconds and not milliseconds.** Lutron hardware needs real time to switch.
+A sub-second blink is either invisible or arrives as a dim flicker, so the
+interval is in whole seconds and there is no Morse-code timing to get wrong.
+
+**Each on-step sends an explicit `brightness_pct`.** Without one, the integration
+chooses the level itself — and some restore whatever the light was last set to, so
+a dimmer left at 5% would blink almost invisibly. Sending it makes the signal the
+same every time. `switch.*` entities have no level, so a `brightness` sent to one
+is an error rather than a silently dropped field.
+
+Every step also sends `transition: 0`, intended to stop a dimmer's fade softening
+the edge. Whether that has any effect depends on the entity declaring
+`LightEntityFeature.TRANSITION` — check with
+`supported_features & 32` on your own lights; if it is not set, Home Assistant
+silently ignores the field and the blink is unaffected either way.
+
+**It returns immediately.** The blinking runs on a background thread, because
+holding the request open for 10-300 s would time out an iPhone Shortcut. The
+response says what was *started*; the outcome lands in the `blink` log:
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/logs/blink/read
+# -> LUTRON SOS light.kitchen_main: 10s at 2s, 6 calls, 0 failed, ended off
+```
+
+Notes and limits:
+
+- **Ends off, always.** If the last period was an on, a closing off is appended.
+  The previous state is not read or restored — the light is dark afterwards even
+  if it was on before.
+- **`brightness: 0` is rejected**, since it would blink the light at nothing while
+  reporting success.
+- **One SOS per entity at a time.** A second request while one is blinking returns
+  `Already running`. A different entity is unaffected, and the guard is released
+  even if the thread crashes.
+- **An `interval` longer than the `duration` is rejected**, since it would give a
+  single on with nothing after it.
+- Gated by the `lutron` feature switch and the `home_assistant_lutron` job switch,
+  exactly like the light and scene endpoints.
+
+### Switches and errors
+
+Two switches gate this job, like the other Home Assistant integrations:
+
+- `POST /ha/lutron/disable` — the whole integration stops; both endpoints return
+  `"skipped"` and no HTTP request is made.
+- `POST /jobs/home_assistant_lutron/disable` — both webhook paths stop responding, returning
+  `403 {"status": "disabled"}`.
+
+Every problem is reported in the JSON result rather than raised, and nothing
+reaches Home Assistant when a request is rejected:
+
+| Error | Cause |
+| ----- | ----- |
+| `Missing light` / `Missing scene` | no `light`/`scene`/`entity` field |
+| `Unknown light` / `Unknown scene` | not an alias and not an entity id; the message lists the known aliases |
+| `Invalid state` | `state` was not `on`/`off`/`toggle` |
+| `Invalid brightness` | not a number, or outside 0-100 |
+| `Invalid transition` | not a number, or negative |
+| `Not dimmable` | `brightness` sent to a `switch.*` entity |
+| `Conflicting request` | `brightness` combined with `state: "off"` |
+| `Wrong entity domain` | a scene sent to `/light`, or a light sent to `/scene` |
+| `Invalid duration` / `Invalid interval` | an SOS field outside its range, or interval > duration |
+| `Already running` | an SOS is already blinking that entity |
+
+## Speak
+
+Say something out loud on a HomePod, speaker, or any Home Assistant media player.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/ha \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"message": "The alarm has been armed."}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `message` (or `text`) | yes | What to say; max 500 characters |
+| `id` | no | Who is asking; recorded in the log. Defaults to `娜`, like everywhere else |
+| `speaker` (or `media_player`) | see below | An alias from `home_assistant_entities.json`, or a full `media_player.*` entity id |
+| `language` | no | Passed to the provider, e.g. `en`, `ja`. Omit for its default |
+| `volume` | no | Speaker volume as a percentage, 1-100. Set before speaking, and it **stays** |
+
+`speaker` may be **omitted when exactly one is configured**. With several it must
+be named, and the error lists them — it will not guess which room to talk to.
+
+### Setup
+
+Both entity ids live in the `speak` section of
+**`configs/home_assistant_entities.json`**:
+
+```json
+"speak": {
+    "tts": "tts.google_en_com",
+    "speakers": {
+        "homepod": "media_player.homepod_mini",
+        "kitchen": "media_player.kitchen_homepod"
+    }
+}
+```
+
+Find your real ids — the `tts.*` one especially, whose name varies with the
+provider and language you added:
+
+```bash
+curl -s -H "Authorization: Bearer $HA_TOKEN" http://<hostID>:8123/api/states \
+  | python3 -c '
+import json,sys
+for e in json.load(sys.stdin):
+    if e["entity_id"].startswith(("media_player.","tts.")):
+        print(e["entity_id"], "|", e["attributes"].get("friendly_name",""))'
+```
+
+Adding a HomePod to Home Assistant: Settings → Devices & Services → Add
+Integration → **Apple TV** (it covers HomePods too, via AirPlay). It usually
+appears under Discovered already and needs no PIN.
+
+### Examples
+
+```bash
+# The only configured speaker
+-d '{"message": "Someone is at the door"}'
+
+# A named speaker, and who asked
+-d '{"message": "Dinner is ready", "speaker": "kitchen", "id": "Alex"}'
+
+# Japanese, on the HomePod
+-d '{"message": "おかえりなさい", "speaker": "homepod", "language": "ja"}'
+
+# A speaker with no alias
+-d '{"message": "Test", "speaker": "media_player.office_speaker"}'
+
+# Loud enough to hear from the next room
+-d '{"message": "Someone is at the door", "volume": 80}'
+```
+
+### Who said what
+
+Every request is written to the **default** log (`logs/default.log`) with the
+requester, the speaker, and the exact words — this is the one job that puts words
+in the house's mouth, so it is worth being able to answer "who made it say that?":
+
+```bash
+curl -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/logs/default/read
+```
+
+```text
+================================================================================
+[2026-08-30 18:49:38.893] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by Alex on media_player.homepod_mini at 80% -> success
+"Dinner is ready"
+================================================================================
+[2026-08-30 18:49:38.894] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by 娜 on media_player.homepod_mini [ja] -> success
+"おかえりなさい。玄関の鍵が開いています。"
+================================================================================
+[2026-08-30 18:49:38.895] [DEFAULT]
+--------------------------------------------------------------------------------
+SPEAK by Sam ERROR: Configuration file not found
+"this one failed"
+```
+
+The spoken words sit on their own line — who/where/how on the first, what was
+actually said on the second — so a long announcement stays readable instead of
+running off the end. A failed request still records what was attempted.
+
+A post without an `id` is attributed to `娜`, the same default the presence,
+location and leaving/arriving webhooks use — an unlabelled request is still
+attributed to somebody. Note this goes to `default`, not the `blink` log the
+alarm and Lutron jobs use.
+
+### Notes and limits
+
+- **The TTS provider is the target, the speaker is a field.** Home Assistant's
+  `tts.speak` takes the `tts.*` entity as `entity_id` and the speaker as
+  `media_player_entity_id`, which is easy to get backwards. Putting a
+  `media_player` in the `tts` slot is caught with `Wrong TTS entity` rather than
+  passed to Home Assistant.
+- **`volume` is applied with a separate call, and it stays.** `tts.speak` has no
+  volume of its own, so a `volume` becomes a `media_player.volume_set` immediately
+  before the speech. It is **not** restored afterwards — `tts.speak` returns once
+  Home Assistant has queued the audio, not when the speech ends, so there is no
+  moment to restore at without guessing how long the message takes to say. Pass a
+  `volume` every time if you care what it is.
+- **A failed volume change does not stop the message.** Speaking at the wrong
+  volume beats silence, so the speech still goes out and the result carries a
+  `volume_error`.
+- **`volume: 0` is rejected**, since it would speak silently while reporting
+  success.
+- **It interrupts what is playing** and does not reliably resume it.
+- **The first AirPlay connection takes a second**, so very short messages can clip
+  at the start. Leading with "Attention," or a comma helps.
+- Gated by the `speak` feature switch and the `home_assistant_speak` job switch:
+
+  ```bash
+  curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+    http://localhost:5050/ha/speak/disable        # stop all text-to-speech
+  ```
+
+## Speak (AirPlay)
+
+Say something on a HomePod or any AirPlay speaker **without Home Assistant** —
+macOS renders the words and pyatv streams them straight to the speaker.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/airplay \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"message": "Dinner is ready"}'
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `message` (or `text`) | one of these | What to say; max 500 characters |
+| `file` (or `filename`) | one of these | Play an existing recording from `audio/` instead of synthesizing |
+| `speaker` (or `host`) | see note | An alias from `airplay_config.json`, or a raw IP |
+| `volume` | no | Speaker volume 1-100, set before speaking |
+| `voice` | no | A macOS voice name, overriding the configured one |
+| `id` | no | Who is asking; recorded in the log. Defaults to `娜` |
+
+`speaker` may be omitted when exactly one is configured. Give **either** `message`
+or `file`, not both — for something that plays out loud, guessing which you meant
+would be worse than asking.
+
+### Playing an existing recording
+
+```bash
+-d '{"file": "doorbell.wav"}'
+-d '{"file": "speak_20260831_101112_000_script.wav", "volume": 60}'
+```
+
+The file is read from `audio/` and streamed as-is — nothing is synthesized, and
+`voice` is ignored. **Any** playable file counts (`.wav`, `.mp3`, `.flac`, `.ogg`),
+not only this job's own output, so you can drop a `doorbell.wav` in there and play
+it by name. Purge only ever deletes `speak_*.wav`, so hand-placed clips persist.
+
+Only the **basename** is used, so a value like `../../etc/passwd` becomes
+`passwd` and then has to exist in `audio/` like anything else — nothing can be
+played from outside that directory. A file handed in this way is never deleted.
+
+It logs one line, naming the file, with no quoted words because there are none:
+
+```text
+AIRPLAY PLAY by Alex on 10.0.0.155 at 60% -> success [doorbell.wav]
+```
+
+Compare a spoken request, which adds the words on a second line:
+
+```text
+AIRPLAY SPEAK by Alex on 10.0.0.155 at 40% -> success [speak_20260831_101112_000_Alex.wav]
+"Dinner is ready"
+```
+
+### Uploading a clip and playing it
+
+Send an audio file and it is stored in `audio/` then played straight away.
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/upload \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -F "file=@doorbell.wav" \
+  -F "name=doorbell" \
+  -F "volume=70"
+```
+
+```json
+{"status": "ok", "id": "娜", "stored_as": "doorbell.wav", "original": "doorbell.wav",
+ "bytes": 30124, "replaced": false, "speaker": "10.0.0.155", "volume": 70.0,
+ "play": {"status": "started"},
+ "message": "Stored doorbell.wav and playing it on 10.0.0.155"}
+```
+
+`multipart/form-data` with **one** file part, plus optional form fields:
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| the file part | yes | The audio. `.wav` `.mp3` `.flac` `.ogg` are stored as-is; `.m4a` `.aiff` `.aac` `.caf` are converted |
+| `name` (or `as`) | no | What to store it as. Without one, a date and time is used |
+| `speaker` (or `host`) | see note | Alias or address; optional when only one is configured |
+| `volume` | no | 1-100, applied before playback |
+| `id` | no | Who uploaded it, for the log |
+
+With no `name` you get `2026-08-31_10-56-07.wav`. Note the separators: `/` is a
+path separator and `:` is awkward on several filesystems, so a plain
+`2026/08/31-10:56:07` is not usable as a filename — dashes and an underscore
+stand in for it.
+
+An extension is added if your `name` lacks one, taken from the uploaded file or
+its MIME type. The **real** format wins over the requested one, so asking for
+`name=chime.mp3` while uploading a WAV stores `chime.wav` rather than mislabelling
+it. Only the **basename** of `name` is used, so `../../etc/evil.wav` becomes
+`evil.wav` inside `audio/`. Re-using a name replaces the file and reports
+`"replaced": true`.
+
+#### iPhone audio is converted automatically
+
+An iPhone can only produce **`.m4a`** (Voice Memos, Shortcuts recordings) or
+**`.aiff`**, and RAOP can stream **neither** — pyatv decodes audio with miniaudio,
+which reads only WAV, FLAC, MP3 and Vorbis. AIFF fails too, despite being
+uncompressed, because the container is not one it parses.
+
+So those are transcoded on the way in with macOS's own `/usr/bin/afconvert` — no
+extra dependency:
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/upload \\
+  -H "X-Webhook-Secret: your-shared-secret-here" \\
+  -F "file=@memo.m4a" -F "name=doorbell"
+```
+
+```json
+{"status": "ok", "stored_as": "doorbell.wav", "converted_from": ".m4a",
+ "bytes": 146684, "play": {"status": "started"}}
+```
+
+`stored_as` ends `.wav` because that is what is now on disk; `converted_from`
+tells you what arrived. A file already in a streamable format is stored
+byte-for-byte with `"converted_from": null`.
+
+The conversion runs on a temp file outside `audio/`, so a failed or half-finished
+convert never leaves anything behind — and if `afconvert` rejects the file you get
+`Could not convert the audio` with its actual complaint.
+
+**`speak_*` names are rejected.** That prefix is reserved for synthesized speech
+and is the only pattern [purge](#purging-recordings) deletes — so nothing you
+upload here can ever be trimmed away.
+
+**The file is stored even if playback fails.** A busy or unreachable speaker does
+not cost you the upload; `play` reports that half separately:
+
+```json
+{"status": "ok", "stored_as": "held.wav",
+ "play": {"status": "error", "error": "Already speaking",
+          "message": "10.0.0.155 is busy - stored anyway, play it with {\"file\": \"held.wav\"}"}}
+```
+
+It logs the upload and the playback as two entries:
+
+```text
+AIRPLAY UPLOAD by Alex: doorbell.wav (30124 bytes)
+AIRPLAY PLAY by Alex on 10.0.0.155 at 70% -> success [doorbell.wav]
+```
+
+Replay it any time afterwards without uploading again:
+
+```bash
+-d '{"file": "doorbell.wav", "volume": 70}'
+```
+
+From an iPhone Shortcut, use "Get Contents of URL" with Method POST, the
+`X-Webhook-Secret` header, and Request Body set to **Form** with a field of type
+**File** — the same shape as [Uploads.md](docs/Uploads.md).
+
+### How it works
+
+```text
+text -> say -> audio/speak_<time>_<id>.wav -> pyatv RAOP stream_file -> speaker
+```
+
+`say` is macOS's built-in text-to-speech: entirely local, no API key, no network.
+It writes 44.1 kHz 16-bit PCM, which is AirPlay's native format so nothing has to
+resample.
+
+The audio goes over **RAOP** — the AirPlay *audio* protocol. Note that
+`atv.stream.play_url` is pyatv's *AirPlay* (Apple TV) API and raises
+`NotSupportedError` on a HomePod; `stream_file` is the RAOP one, and it sends the
+bytes directly, so nothing needs to serve the file over HTTP.
+
+**This job must run on the speaker's LAN.** RAOP is a local protocol — that is
+exactly why Home Assistant in Docker could not find the HomePod.
+
+### Setup
+
+```bash
+pip install pyatv          # only this job needs it
+```
+
+`configs/airplay_config.json`:
+
+```json
+{
+    "speakers": { "bedroom": "10.0.0.155" },
+    "voice": null,
+    "rate": null
+}
+```
+
+Find your speaker and confirm it offers RAOP:
+
+```bash
+atvremote scan
+# Name: Bedroom   Address: 10.0.0.155
+#  - Protocol: RAOP, Port: 7000, Credentials: None, Pairing: NotNeeded
+```
+
+`Pairing: NotNeeded` means no credentials, which is why this config holds no
+secrets and is tracked.
+
+**If the voice sounds mechanical**, that is macOS's Compact voice, not this code.
+System Settings → Accessibility → Spoken Content → System Voice → Manage Voices →
+download `Ava (Premium)` or `Zoe (Premium)`, then set `"voice": "Ava (Premium)"`.
+`"rate": 165` (words per minute) also helps — room reverb smears fast speech.
+
+### The recordings
+
+Each request writes a WAV under **`audio/`**, named so it sorts chronologically:
+
+```text
+audio/speak_20260830_233054_291_Alex.wav
+audio/speak_20260830_233055_650_娜.wav
+```
+
+They are **kept**, so you can hear what the house actually said. The log names the
+file, so a line and its recording can be matched up:
+
+```text
+AIRPLAY SPEAK by Alex on 10.0.0.155 at 40% -> success [speak_20260830_233054_291_Alex.wav]
+"Dinner is ready"
+```
+
+`audio/` is gitignored, created on demand, and about 88 KB per second of speech.
+
+### Purging recordings
+
+They accumulate, so trim them like a location history:
+
+```bash
+curl -X POST http://localhost:5050/webhook/speak/purge \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: your-shared-secret-here" \
+  -d '{"records": 5}'
+```
+
+```json
+{"status": "ok", "records": 5, "removed": 4, "kept": 5,
+ "message": "Purged 4 recordings beyond the 5 most recent; 5 kept."}
+```
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `records` (or `keep`) | no | How many of the newest to keep; default 20. `0` removes them all |
+
+Note this trims **only** `speak_*.wav` — synthesized speech. Anything uploaded
+through [`/webhook/speak/upload`](#uploading-a-clip-and-playing-it), or dropped
+into `audio/` by hand, is never removed however low you set `records`. Uploads
+are forbidden from using the `speak_` prefix precisely so this stays true.
+
+- **Newest is by modification time**, not filename, so a renamed file still orders
+  correctly.
+- **Only `speak_*.wav` is ever considered.** Anything else in `audio/` is left
+  alone, so a mis-set directory cannot delete your files.
+- A file that will not delete is counted in `failed` and reported; the rest still
+  go.
+
+### Switches
+
+Gated by its job switch alone — there is deliberately **no** entry in
+`home_assistant_switches.json`, because this path never touches Home Assistant:
+
+```bash
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/jobs/airplay_speak/disable
+```
+
+## Switches
+
+Features are partitioned by switch file, one file per level of the system:
+
+```
+home_assistant_switches.json   do we talk to Home Assistant at all?
+  ├── blink                    ... to arm/disarm the Blink alarm panel
+  ├── notify                   ... to push notifications to a phone
+  ├── lutron                   ... to control Lutron lights and scenes
+  └── speak                    ... to say something on a media player
+
+job_switches.json              which webhook jobs are live
+log_switches.json              which log types are written
+notify_switches.json           which notifications are actually sent
+```
+
+Two kinds of JSON file live in `configs/`, and the suffix tells you which:
+
+- **`*_switches.json`** — runtime on/off state. Entries appear automatically the
+  first time something is used, and you flip them over HTTP. Safe to edit, but
+  the endpoints are easier.
+- **`*_config.json`** — hand-written configuration. Nothing writes to these.
+
+Most features are gated by **two** switches, and both must be on for anything to
+happen: a **master** switch for the whole job, and a **per-key** switch for one
+log type, person, or action.
+
+| What it controls | File → section → key | Toggle with |
+| ---------------- | -------------------- | ----------- |
+| Arming/disarming the panel through Home Assistant, from **any** path | `home_assistant_switches.json` → `features.blink` | `POST /ha/blink/enable\|disable\|toggle` |
+| Sending **any** phone notification through Home Assistant | `home_assistant_switches.json` → `features.notify` | `POST /ha/notify/enable\|disable\|toggle` |
+| Controlling Lutron lights and scenes through Home Assistant | `home_assistant_switches.json` → `features.lutron` | `POST /ha/lutron/enable\|disable\|toggle` |
+| Speaking a message on a media player through Home Assistant | `home_assistant_switches.json` → `features.speak` | `POST /ha/speak/enable\|disable\|toggle` |
+| A whole job, including every webhook it owns | `job_switches.json` → `jobs.<job>` | `POST /jobs/<job>/enable\|disable\|toggle` |
+| One log type (`blink`, `upload`, `default`) | `log_switches.json` → `types.<type>` | `POST /logs/<type>/enable\|disable\|toggle` |
+| One person's location notification | `notify_switches.json` → `location_log.<id>` | `POST /location/notify/<id>/enable\|disable\|toggle` |
+| The arm / disarm notification | `notify_switches.json` → `blink_control.<action>` | `POST /blink/notify/<action>/enable\|disable\|toggle` |
+
+The master switch for **every** phone notification is the `notify_phone` job, so
+`POST /jobs/notify_phone/disable` silences the leaving/arriving, location, and
+arm/disarm notifications at once.
+
+**`home_assistant_switches.json` is the top tier.** Each feature is checked at the
+one place that Home Assistant API is called, so a single switch covers every
+caller:
+
+| Feature | Checked in | Covers |
+| ------- | ---------- | ------ |
+| `blink` | `set_alarm()` | `/webhook/blink/*` **and** the leaving/arriving webhooks |
+| `notify` | `notify_phone()` | the leaving/arriving, location, and arm/disarm notifications |
+| `lutron` | the `jobs.home_assistant_lutron` handlers | `/webhook/lutron/*` |
+| `speak` | `jobs.home_assistant_speak` | `/webhook/speak/ha` |
+
+A feature that is off makes the call a no-op reporting `"skipped"` — no HTTP
+request, and `home_assistant_config.json` is not even read, so a feature can be
+switched off before it is configured. The two are independent: you can keep the
+notifications while the panel is switched off, which is useful while a Home
+Assistant problem is being waited out.
+
+```bash
+# Stop touching the alarm panel, keep every notification
+curl -X POST -H "X-Webhook-Secret: your-shared-secret-here" \
+  http://localhost:5050/ha/blink/disable
+
+# What is on?
+curl -H "X-Webhook-Secret: your-shared-secret-here" http://localhost:5050/ha
+# -> {"features":[{"feature":"blink","enabled":false},{"feature":"lutron","enabled":true},{"feature":"notify","enabled":true}]}
+```
+
+An unknown key counts as **on** and is written to the file the first time it is
+checked, so it shows up in the listing and can be turned off afterwards. That
+also means a missing switch file is not an error — everything is simply enabled.
+
+### What is *not* a switch
+
+| File | Role |
+| ---- | ---- |
+| `config.json` | Routing table: webhook path → job module + function, and `require_secret` per path |
+| `notify_config.json` | The **text** of every notification (titles, messages, per-home overrides) |
+| `home_assistant_config.json` | Home Assistant URL, token, panel entity, notify target (gitignored) |
+| `webhook_secret.json` | The shared webhook secret (gitignored) |
+
+`notify_config.json` and `notify_switches.json` are the pair to keep straight:
+one says **what** a notification says, the other says **whether** it is sent.
+
+Two flags inside `notify_config.json` do behave like switches, but they gate the
+**alarm panel**, not a notification: `arm` on `leaving_home` and `disarm` on
+`arriving_home` decide whether those webhooks touch the panel at all. Turning off
+a `blink_control` switch only silences the notification — `/webhook/blink/*` still
+arms and disarms.
+
 ## Configuration
 
 **`configs/config.json`** maps webhook paths to job modules:
@@ -754,7 +1555,7 @@ its `Latitude` / `Longitude` to `/webhook/location/log`.
     "webhooks": [
         {
             "path": "/webhook/blink/arm",
-            "module": "jobs.home_assistant_arm_disarm",
+            "module": "jobs.home_assistant_blink",
             "require_secret": true
         }
     ]
@@ -792,24 +1593,52 @@ authenticated webhook. It is gitignored — copy it from the example and fill it
 }
 ```
 
-**`configs/location_notify_config.json`** holds one on/off switch per person for
-the notification a logged position sends (see
-[Notifying your phone](#notifying-your-phone-per-person)). It is created
-automatically and updated through the `/location/notify` endpoints:
+**`configs/notify_switches.json`** holds the on/off switches for every phone
+notification this server sends — one per person for logged positions
+(see [Notifying your phone](#notifying-your-phone-per-person)) and one per action
+for the arm/disarm notification (see [Switches](#switches)). It is created
+automatically and updated through the `/location/notify` and `/blink/notify`
+endpoints:
 
 ```json
 {
-    "ids": { "Alex": true }
+    "location_log": { "Alex": true },
+    "blink_control": { "arm": true, "disarm": true }
 }
 ```
 
-**`configs/job_config.json`** tracks which jobs are enabled. It is created automatically
+**`configs/home_assistant_entities.json`** holds every Home Assistant entity this
+server acts on — the alarm panel, the phone notify target, and the Lutron alias
+maps. It is tracked (no secrets), and its sections are named after the Home
+Assistant features:
+
+```json
+{
+    "blink":  { "panel_AMS": "alarm_control_panel.blink_armstrong" },
+    "notify": { "target":    "mobile_app_aisingioro" },
+    "lutron": { "lights": {}, "scenes": {} }
+}
+```
+
+**`configs/home_assistant_switches.json`** decides whether this server uses Home
+Assistant at all — `blink` for the alarm panel, `notify` for phone notifications,
+`lutron` for lights and scenes, and `speak` for text-to-speech (see
+[Switches](#switches)). It is created automatically and updated through the `/ha`
+endpoints:
+
+```json
+{
+    "features": { "blink": true, "notify": true, "lutron": true, "speak": true }
+}
+```
+
+**`configs/job_switches.json`** tracks which jobs are enabled. It is created automatically
 and updated through the `/jobs` endpoints — you rarely edit it by hand:
 
 ```json
 {
     "jobs": {
-        "home_assistant_arm_disarm": true
+        "home_assistant_blink": true
     }
 }
 ```
@@ -817,10 +1646,13 @@ and updated through the `/jobs` endpoints — you rarely edit it by hand:
 ## Testing
 
 ```bash
-python3 jobs/home_assistant_arm_disarm.py   # exercise the job directly
+python3 jobs/home_assistant_blink.py        # exercise the job directly
 python3 tests/test_job_management.py        # job enable/disable logic
 python3 tests/test_log_engine.py            # logging engine tests
 python3 tests/test_file_upload.py           # file upload job tests
+python3 tests/test_lutron.py                # Lutron light/scene job + shared HA API caller
+python3 tests/test_speak.py                 # text-to-speech via Home Assistant
+python3 tests/test_airplay_speak.py         # text-to-speech via AirPlay, and audio purge
 python3 tests/test_notify_phone.py          # phone notification job tests (incl. per-home text)
 python3 tests/test_presence_webhook.py      # presence read/write webhook tests (incl. multi-home)
 python3 tests/test_location.py              # location log/fetch/history/purge + notify tests

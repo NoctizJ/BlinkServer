@@ -34,8 +34,8 @@ def _fresh_files_dir():
     logs_dir = Path(tempfile.mkdtemp(prefix="blink_upload_logs_"))
     file_upload.FILES_DIR = files_dir
     log_engine.LOGS_DIR = logs_dir
-    log_engine.LOG_CONFIG_PATH = logs_dir / "log_config.json"
-    log_engine.JOB_CONFIG_PATH = logs_dir / "job_config.json"
+    log_engine.LOG_SWITCHES_PATH = logs_dir / "log_switches.json"
+    log_engine.JOB_SWITCHES_PATH = logs_dir / "job_switches.json"
     return files_dir
 
 

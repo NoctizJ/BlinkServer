@@ -49,7 +49,7 @@ def test_unknown_job_rejected():
     """Regression: management endpoints must not create phantom job entries.
 
     A stale caller hitting /jobs/arm/toggle used to silently add an "arm"
-    entry to job_config.json. Unknown jobs should now return 404 and change
+    entry to job_switches.json. Unknown jobs should now return 404 and change
     nothing. (Requires Flask and webhook_secret.json.)
     """
     from app import app as flask_app
@@ -59,7 +59,7 @@ def test_unknown_job_rejected():
     with open(secret_path) as f:
         headers = {"X-Webhook-Secret": json.load(f)["WEBHOOK_SECRET"]}
 
-    # Snapshot so this test leaves job_config.json untouched.
+    # Snapshot so this test leaves job_switches.json untouched.
     before = load_job_config()
 
     client = flask_app.test_client()

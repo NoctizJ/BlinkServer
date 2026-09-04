@@ -411,7 +411,7 @@ def test_presence_write_never_touches_the_alarm():
     /webhook/blink/* and the notify handlers, never from here.
     """
     print("Testing that presence read/write leave the alarm alone...")
-    import jobs.home_assistant_arm_disarm as hd
+    import jobs.home_assistant_blink as hd
 
     with temp_presence_file(), \
             mock.patch.object(hd, "set_alarm") as set_alarm, \
