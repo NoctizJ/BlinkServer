@@ -454,32 +454,206 @@ def test_failed_snapshot_write_is_retried_next_run():
     print("  OK")
 
 
-def test_read_returns_latest_or_requested_report():
-    print("Testing read...")
+DAY3 = dict(DAY2, NVDA=_h("NVIDIA Corp", 9.50, 100.0), ZED=_h("Zed Co", 0.30, 1.0))  # 2026-11-02
+
+BAD_DATES = ("../state/presence", "2026-10-3", "latest", "2026-10-30/../..", "٢٠٢٦-١٠-٣٠")
+DAMAGED_SNAPSHOTS = ("{oops", "{}", "[1]")
+
+
+def _save_days(*days):
+    """Run the job once per (as_of, holdings) pair so the snapshots exist."""
+    for as_of, holdings in days:
+        with _fetch_returns(as_of, holdings):
+            assert qj.run({})["status"] == "ok"
+
+
+def test_read_ranks_the_newest_snapshot_by_weight():
+    print("Testing read ranking...")
+    book = {"BBB": _h("Bee Co", 5.0, 2.0), "AAA": _h("Aye Co", 5.0, 3.0),
+            "CCC": _h("Cee Co", 9.0, 1.0), "DDD": _h("Dee Co", 1.0, 4.0)}
     with temp_stock():
-        empty = qj.read({})
-        assert empty["status"] == "not_found", empty
-        with _fetch_returns("2026-10-29", DAY1):
-            qj.run({})
-        with _fetch_returns("2026-10-30", DAY2):
-            qj.run({})
-        latest = qj.read({})
-        assert latest["status"] == "ok" and latest["as_of"] == "2026-10-30", latest
-        assert latest["report"]["added"][0]["ticker"] == "NEW", latest
-        assert "NEW" in latest["message"]
-        older = qj.read({"date": "2026-10-29"})
-        assert older["as_of"] == "2026-10-29" and older["report"]["baseline"] is True, older
-        assert qj.read({"date": "2020-01-01"})["status"] == "not_found"
+        assert qj.read({})["status"] == "not_found"
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", book))
+        res = qj.read({})
+        assert res["status"] == "ok" and res["as_of"] == "2026-10-30", res
+        assert [r["ticker"] for r in res["holdings"]] == ["CCC", "AAA", "BBB", "DDD"], res
+        assert [r["rank"] for r in res["holdings"]] == [1, 2, 3, 4], res
+        assert res["holdings"][0] == {"rank": 1, "ticker": "CCC", "name": "Cee Co",
+                                      "weight": 9.0, "shares": 1.0}, res
+        assert res["count"] == 4 and res["total_weight"] == 20.0, res
+        lines = res["message"].split("\n")
+        assert lines[0] == "QQQ holdings — 2026-10-30 (4 holdings, 20.00% of the fund)", lines
+        assert lines[1] == "  1  CCC    Cee Co  9.00%", lines
+        assert lines[-1] == "  4  DDD    Dee Co  1.00%", lines
     print("  OK")
 
 
-def test_read_rejects_dates_that_are_not_dates():
-    """The date becomes part of a file name; anything but YYYY-MM-DD must be refused."""
-    print("Testing read path safety...")
+def test_read_pads_ranks_to_the_widest():
+    print("Testing read rank alignment...")
+    book = {f"T{n:02d}": _h(f"Name {n}", 20.0 - n) for n in range(10)}
+    text = qj.format_holdings("2026-10-30", qj.ranked_holdings(book), 100.0)
+    lines = text.split("\n")
+    assert lines[1].startswith("   1  T00"), lines[1]
+    assert lines[10].startswith("  10  T09"), lines[10]
+    print("  OK")
+
+
+def test_read_by_date_returns_that_snapshot():
+    print("Testing read by date...")
     with temp_stock():
-        for bad in ("../state/presence", "2026-10-3", "latest", "2026-10-30/../..", "٢٠٢٦-١٠-٣٠"):
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2))
+        older = qj.read({"date": "2026-10-29"})
+        assert older["status"] == "ok" and older["as_of"] == "2026-10-29", older
+        assert [r["ticker"] for r in older["holdings"]] == ["NVDA", "AAPL", "OLD"], older
+        assert older["total_weight"] == 17.5, older
+        missing = qj.read({"date": "2020-01-01"})
+        assert missing["status"] == "not_found", missing
+        assert "2026-10-29" in missing["message"] and "2026-10-30" in missing["message"], missing
+    print("  OK")
+
+
+def test_read_reports_a_corrupt_snapshot():
+    print("Testing read of a corrupt snapshot...")
+    for damage in DAMAGED_SNAPSHOTS:
+        with temp_stock() as stock:
+            _save_days(("2026-10-29", DAY1))
+            (stock.dir / "qqqholdings_2026-10-29.json").write_text(damage)
+            res = qj.read({})
+            assert res["status"] == "error" and "2026-10-29" in res["message"], (damage, res)
+    print("  OK")
+
+
+def test_read_and_diff_reject_dates_that_are_not_dates():
+    """The date becomes part of a file name; anything but YYYY-MM-DD must be refused."""
+    print("Testing date path safety...")
+    with temp_stock():
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2))
+        for bad in BAD_DATES:
             res = qj.read({"date": bad})
             assert res["status"] == "error", (bad, res)
+            res = qj.diff({"first_date": bad, "second_date": "2026-10-30"})
+            assert res["status"] == "error", (bad, res)
+            res = qj.diff({"first_date": "2026-10-29", "second_date": bad})
+            assert res["status"] == "error", (bad, res)
+    print("  OK")
+
+
+def test_diff_defaults_to_the_two_newest_snapshots():
+    print("Testing diff of the two newest...")
+    with temp_stock() as stock:
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2), ("2026-11-02", DAY3))
+        res = qj.diff({})
+        assert res["status"] == "ok", res
+        assert res["as_of"] == "2026-11-02" and res["previous_as_of"] == "2026-10-30", res
+        stored = json.loads((stock.dir / "qqqholdings_report_2026-11-02.json").read_text())
+        assert res["report"] == stored, (res["report"], stored)
+        stored_text = (stock.dir / "qqqholdings_report_2026-11-02.txt").read_text()
+        assert res["message"] == stored_text.strip(), res["message"]
+        assert [r["ticker"] for r in res["report"]["added"]] == ["ZED"], res
+        assert res["report"]["changed"][0]["ticker"] == "NVDA", res
+    print("  OK")
+
+
+def test_diff_between_two_chosen_dates():
+    print("Testing diff of chosen dates...")
+    with temp_stock() as stock:
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2), ("2026-11-02", DAY3))
+        before = stock.files()
+        res = qj.diff({"first_date": "2026-10-29", "second_date": "2026-11-02"})
+        assert res["status"] == "ok", res
+        assert res["previous_as_of"] == "2026-10-29" and res["as_of"] == "2026-11-02", res
+        report = res["report"]
+        assert report["previous_as_of"] == "2026-10-29" and report["as_of"] == "2026-11-02", report
+        assert report["baseline"] is False and report["holding_count"] == len(DAY3), report
+        assert [r["ticker"] for r in report["added"]] == ["NEW", "ZED"], report
+        assert [r["ticker"] for r in report["removed"]] == ["OLD"], report
+        assert [(c["ticker"], c["change"]) for c in report["changed"]] == [("NVDA", 0.5)], report
+        assert "(vs 2026-10-29)" in res["message"], res["message"]
+        assert stock.files() == before, stock.files()   # diff never writes
+    print("  OK")
+
+
+def test_diff_with_reversed_dates_is_the_inverse_not_a_swap():
+    print("Testing diff with reversed dates...")
+    with temp_stock():
+        _save_days(("2026-10-29", DAY1), ("2026-11-02", DAY3))
+        fwd = qj.diff({"first_date": "2026-10-29", "second_date": "2026-11-02"})
+        rev = qj.diff({"first_date": "2026-11-02", "second_date": "2026-10-29"})
+        assert rev["status"] == "ok", rev
+        assert rev["previous_as_of"] == "2026-11-02" and rev["as_of"] == "2026-10-29", rev
+        assert rev["report"]["holding_count"] == len(DAY1), rev
+        assert [r["ticker"] for r in rev["report"]["added"]] == ["OLD"], rev
+        assert [r["ticker"] for r in rev["report"]["removed"]] == ["NEW", "ZED"], rev
+        assert [c["change"] for c in fwd["report"]["changed"]] == [0.5], fwd
+        assert [c["change"] for c in rev["report"]["changed"]] == [-0.5], rev
+    print("  OK")
+
+
+def test_diff_needs_both_dates_or_neither():
+    print("Testing diff with one date...")
+    with temp_stock():
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2))
+        for payload in ({"first_date": "2026-10-29"}, {"second_date": "2026-10-30"}):
+            res = qj.diff(payload)
+            assert res["status"] == "error" and "both" in res["message"], (payload, res)
+    print("  OK")
+
+
+def test_diff_needs_two_snapshots_and_known_dates():
+    print("Testing diff not_found cases...")
+    with temp_stock():
+        assert qj.diff({})["status"] == "not_found"
+        _save_days(("2026-10-29", DAY1))
+        res = qj.diff({})
+        assert res["status"] == "not_found" and "found 1" in res["message"], res
+        _save_days(("2026-10-30", DAY2))
+        assert qj.diff({})["status"] == "ok"
+        res = qj.diff({"first_date": "2020-01-01", "second_date": "2026-10-30"})
+        assert res["status"] == "not_found" and "2020-01-01" in res["message"], res
+        res = qj.diff({"first_date": "2026-10-29", "second_date": "2030-01-01"})
+        assert res["status"] == "not_found" and "2030-01-01" in res["message"], res
+        assert "2026-10-29" in res["message"] and "2026-10-30" in res["message"], res
+    print("  OK")
+
+
+def test_diff_threshold_hides_small_moves_and_is_validated():
+    print("Testing diff threshold...")
+    nudged = dict(DAY1, NVDA=_h("NVIDIA Corp", 9.05, 100.0))
+    with temp_stock():
+        _save_days(("2026-10-29", DAY1), ("2026-10-30", nudged))
+        res = qj.diff({})
+        assert len(res["report"]["changed"]) == 1 and res["report"]["threshold"] == qj.DEFAULT_THRESHOLD, res
+        res = qj.diff({"threshold": "0.1"})
+        assert res["status"] == "ok" and res["report"]["changed"] == [], res
+        assert res["report"]["threshold"] == 0.1, res
+        assert "No changes." in res["message"], res["message"]
+        for bad in ("nan", "inf", "-inf", "-1", -0.5, True, "abc", None, [1]):
+            res = qj.diff({"threshold": bad})
+            assert res["status"] == "error" and "threshold" in res["message"], (bad, res)
+        assert qj.diff({"threshold": "0"})["status"] == "ok"
+    print("  OK")
+
+
+def test_diff_reports_a_corrupt_snapshot():
+    print("Testing diff of a corrupt snapshot...")
+    for damage in DAMAGED_SNAPSHOTS:
+        for victim in ("2026-10-29", "2026-10-30"):
+            with temp_stock() as stock:
+                _save_days(("2026-10-29", DAY1), ("2026-10-30", DAY2))
+                (stock.dir / f"qqqholdings_{victim}.json").write_text(damage)
+                res = qj.diff({})
+                assert res["status"] == "error", (damage, victim, res)
+    print("  OK")
+
+
+def test_diff_of_a_date_with_itself_has_no_changes():
+    print("Testing diff of identical dates...")
+    with temp_stock():
+        _save_days(("2026-10-29", DAY1))
+        res = qj.diff({"first_date": "2026-10-29", "second_date": "2026-10-29"})
+        assert res["status"] == "ok", res
+        assert res["report"]["added"] == res["report"]["removed"] == res["report"]["changed"] == [], res
+        assert "No changes." in res["message"], res["message"]
     print("  OK")
 
 
@@ -556,23 +730,13 @@ def test_a_logging_failure_does_not_fail_a_finished_run():
     print("  OK")
 
 
-def test_read_reports_a_corrupt_report_file():
-    print("Testing read of a corrupt report...")
-    with temp_stock() as stock:
-        with _fetch_returns("2026-10-29", DAY1):
-            qj.run({})
-        (stock.dir / "qqqholdings_report_2026-10-29.json").write_text("{oops")
-        res = qj.read({"date": "2026-10-29"})
-        assert res["status"] == "error" and "2026-10-29" in res["message"], res
-    print("  OK")
-
-
 def test_webhooks_are_registered():
     print("Testing webhook registration...")
     config = json.loads((Path(__file__).parent.parent / "configs" / "config.json").read_text())
     hooks = {h["path"]: h for h in config["webhooks"]}
     for path, function in (("/webhook/qqqholdings/run", "run"),
-                           ("/webhook/qqqholdings/read", "read")):
+                           ("/webhook/qqqholdings/read", "read"),
+                           ("/webhook/qqqholdings/diff", "diff")):
         hook = hooks.get(path)
         assert hook, f"{path} not registered in configs/config.json"
         assert hook["module"] == "jobs.qqqholdings_job", hook

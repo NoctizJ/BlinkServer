@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Daily QQQ holdings report.
 
-Two webhooks share this module (see config.json), and the scheduler calls
+Three webhooks share this module (see config.json), and the scheduler calls
 ``run`` every weekday morning (see configs/schedule.json):
 
   - run(payload)  -> POST /webhook/qqqholdings/run
   - read(payload) -> POST /webhook/qqqholdings/read
+  - diff(payload) -> POST /webhook/qqqholdings/diff
 
 ``run`` downloads the holdings, compares them with the previous snapshot in
 ``stock/`` and saves a report of what was added, what was removed and how the
@@ -14,11 +15,16 @@ weight of each remaining ticker moved::
     {}                       # the normal call
     {"threshold": 0.05}      # ignore weight moves under 0.05 percentage points
 
-``read`` returns a saved report, as structured data plus a ready-to-display
-``message``::
+``read`` returns the holdings of one snapshot, largest weight first, each with its rank::
 
-    {}                        # the latest report
-    {"date": "2026-10-30"}    # the report for that as-of date
+    {}                        # the newest snapshot
+    {"date": "2026-10-30"}    # the snapshot for that as-of date
+
+``diff`` compares two snapshots and returns what was added, removed and re-weighted::
+
+    {}                        # the newest snapshot against the one before it
+    {"first_date": "2026-10-28", "second_date": "2026-10-30"}   # from first to second
+    {"threshold": 0.05}       # optional: ignore weight moves under 0.05 percentage points
 
 Files in ``stock/`` (the date is the as-of date inside Invesco's file):
 
@@ -56,7 +62,6 @@ STOCK_DIR = REPO_ROOT / "stock"
 
 LOG_TYPE = "qqqholdings"
 SNAPSHOT_RE = re.compile(r"^qqqholdings_([0-9]{4}-[0-9]{2}-[0-9]{2})\.json$")
-REPORT_RE = re.compile(r"^qqqholdings_report_([0-9]{4}-[0-9]{2}-[0-9]{2})\.json$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 # A scheduled run and a manual webhook call can overlap; only one may write at a time.
@@ -126,6 +131,41 @@ def format_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def ranked_holdings(holdings: Dict[str, dict]) -> List[dict]:
+    """Holdings largest weight first (ties by ticker), each with its rank from 1."""
+    rows = sorted(holdings.items(), key=lambda item: (-item[1]["weight"], item[0]))
+    return [{"rank": rank, "ticker": ticker, "name": h["name"],
+             "weight": h["weight"], "shares": h["shares"]}
+            for rank, (ticker, h) in enumerate(rows, 1)]
+
+
+def format_holdings(as_of: str, ranked: List[dict], total_weight: float) -> str:
+    """Render ranked holdings as plain text."""
+    width = len(str(len(ranked)))
+    lines = [f"QQQ holdings — {as_of} ({len(ranked)} holdings, {total_weight:.2f}% of the fund)"]
+    lines += [f"  {r['rank']:>{width}}  {r['ticker']:<6} {r['name']}  {r['weight']:.2f}%"
+              for r in ranked]
+    return "\n".join(lines)
+
+
+def _date_param(payload: dict, key: str) -> Optional[str]:
+    """A YYYY-MM-DD date from the payload, or None when absent; ValueError if malformed.
+
+    The date becomes part of a file name, so nothing but YYYY-MM-DD is accepted."""
+    value = str(payload.get(key) or "").strip()
+    if value and not DATE_RE.match(value):
+        raise ValueError(f"{key} must look like YYYY-MM-DD")
+    return value or None
+
+
+def _not_found(date: Optional[str], dates: List[str]) -> dict:
+    if not dates:
+        return {"status": "not_found", "message": "No QQQ holdings have been saved yet"}
+    return {"status": "not_found",
+            "message": f"No QQQ holdings were saved for {date}; "
+                       f"saved dates run from {dates[0]} to {dates[-1]}"}
+
+
 def _log(text: str) -> None:
     """Log without letting a logging problem fail or undo a finished run."""
     try:
@@ -145,6 +185,22 @@ def _valid_threshold(value) -> Optional[float]:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _make_report(as_of: str, previous: Optional[str], holdings: Dict[str, dict],
+                 old_holdings: Optional[Dict[str, dict]], threshold: float) -> dict:
+    """The report for ``holdings`` as of ``as_of`` against ``old_holdings`` (None: a baseline)."""
+    report = {
+        "as_of": as_of,
+        "previous_as_of": previous,
+        "baseline": old_holdings is None,
+        "threshold": threshold,
+        "holding_count": len(holdings),
+        "added": [], "removed": [], "changed": [],
+    }
+    if old_holdings is not None:
+        report.update(diff_holdings(old_holdings, holdings, threshold))
+    return report
+
+
 def _store_report(as_of: str, holdings: Dict[str, dict], threshold: float) -> dict:
     """Diff against the latest earlier snapshot and write the report and snapshot."""
     dates = _dates(SNAPSHOT_RE)
@@ -156,17 +212,9 @@ def _store_report(as_of: str, holdings: Dict[str, dict], threshold: float) -> di
                 "message": f"No new data: the latest holdings are still as of {dates[-1]}"}
 
     previous = dates[-1] if dates else None
-    report = {
-        "as_of": as_of,
-        "previous_as_of": previous,
-        "baseline": previous is None,
-        "threshold": threshold,
-        "holding_count": len(holdings),
-        "added": [], "removed": [], "changed": [],
-    }
     try:
-        if previous is not None:
-            report.update(diff_holdings(_load_snapshot(previous), holdings, threshold))
+        old = _load_snapshot(previous) if previous else None
+        report = _make_report(as_of, previous, holdings, old, threshold)
         text = format_report(report)
         _write_atomic(_report_json_path(as_of), json.dumps(report, indent=2, ensure_ascii=False))
         _write_atomic(_report_text_path(as_of), text + "\n")
@@ -212,26 +260,52 @@ def run(payload: Optional[dict] = None) -> dict:
 
 
 def read(payload: Optional[dict] = None) -> dict:
-    """Return a saved report: the latest, or the one for ``date``."""
+    """Return one snapshot's holdings ranked by weight: the newest, or the one for ``date``."""
     payload = payload or {}
-    date = str(payload.get("date") or "").strip() or None
-    # The date becomes part of a file name, so accept nothing but YYYY-MM-DD.
-    if date is not None and not DATE_RE.match(date):
-        return {"status": "error", "message": "date must look like YYYY-MM-DD"}
-
-    if date is None:
-        reports = _dates(REPORT_RE)
-        if not reports:
-            return {"status": "not_found",
-                    "message": "No QQQ holdings report has been saved yet"}
-        date = reports[-1]
-
-    path = _report_json_path(date)
-    if not path.is_file():
-        return {"status": "not_found", "message": f"No QQQ holdings report for {date}"}
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
+        date = _date_param(payload, "date")
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    dates = _dates(SNAPSHOT_RE)
+    date = date or (dates[-1] if dates else None)
+    if date is None or date not in dates:
+        return _not_found(date, dates)
+    try:
+        ranked = ranked_holdings(_load_snapshot(date))
+        total = round(sum(r["weight"] for r in ranked), 4)
+        text = format_holdings(date, ranked, total)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"status": "error", "message": f"could not read the QQQ holdings for {date}: {exc}"}
+    return {"status": "ok", "as_of": date, "count": len(ranked), "total_weight": total,
+            "holdings": ranked, "message": text}
+
+
+def diff(payload: Optional[dict] = None) -> dict:
+    """Diff two snapshots: the newest against the one before it, or ``first_date`` against ``second_date``."""
+    payload = payload or {}
+    threshold = _valid_threshold(payload.get("threshold", DEFAULT_THRESHOLD))
+    if threshold is None:
+        return {"status": "error", "message": "threshold must be a number, zero or more"}
+    try:
+        first, second = _date_param(payload, "first_date"), _date_param(payload, "second_date")
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    if bool(first) != bool(second):
+        return {"status": "error",
+                "message": "give both first_date and second_date, or neither "
+                           "(neither compares the two newest snapshots)"}
+    dates = _dates(SNAPSHOT_RE)
+    if not first:
+        if len(dates) < 2:
+            return {"status": "not_found",
+                    "message": f"Need at least two saved snapshots to compare; found {len(dates)}"}
+        first, second = dates[-2], dates[-1]
+    for date in (first, second):
+        if date not in dates:
+            return _not_found(date, dates)
+    try:
+        report = _make_report(second, first, _load_snapshot(second), _load_snapshot(first), threshold)
         text = format_report(report)
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return {"status": "error", "message": f"could not read the QQQ holdings report for {date}: {exc}"}
-    return {"status": "ok", "as_of": date, "report": report, "message": text}
+        return {"status": "error", "message": f"could not compare the QQQ holdings: {exc}"}
+    return {"status": "ok", "as_of": second, "previous_as_of": first, "report": report, "message": text}

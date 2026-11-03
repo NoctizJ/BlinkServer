@@ -137,6 +137,12 @@
       "module": "jobs.qqqholdings_job",
       "function": "read",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/qqqholdings/diff",
+      "module": "jobs.qqqholdings_job",
+      "function": "diff",
+      "require_secret": true
     }
   ]
 }

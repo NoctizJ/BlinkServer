@@ -8,12 +8,12 @@ Status: implemented
 Every weekday at 6:30 AM, BlinkServer downloads the QQQ holdings list from Invesco,
 compares it with the previous snapshot, and saves a report of which tickers were
 added, which were removed, and how the weight of each remaining ticker changed.
-The report is readable over a webhook. Broadcasting it as an iMessage is a later
+The holdings and the report are readable over webhooks. Broadcasting it as an iMessage is a later
 step and out of scope here.
 
 ## Non-goals
 
-- Sending the report anywhere (iMessage, phone notification). The `read` webhook is
+- Sending the report anywhere (iMessage, phone notification). The `read` and `diff` webhooks are
   the hand-off point for that later step.
 - A market-holiday calendar. The as-of date in Invesco's file covers holidays (see
   Data flow).
@@ -26,13 +26,13 @@ step and out of scope here.
 | `jobs/scheduler.py` | Runs one job daily at HH:MM in a timezone, weekdays only, from a thread that `app.py`'s `__main__` block starts once. Handles retry, catch-up and sleep (see Failure handling). | `configs/schedule.json` |
 | `jobs/qqqholdings_fetch.py` | Downloads QQQ holdings from Invesco and normalizes them to `{ticker: {name, weight, shares}}` plus the file's as-of date. | `requests` |
 | `jobs/qqqholdings_diff.py` | Pure function: old map + new map -> `added`, `removed`, `changed`. No I/O. | nothing |
-| `jobs/qqqholdings_job.py` | Orchestration (fetch, load previous, diff, save, log). Exposes `run` (manual trigger) and `read` webhooks. | the three above, log engine, switches |
+| `jobs/qqqholdings_job.py` | Orchestration (fetch, load previous, diff, save, log). Exposes `run` (manual trigger), `read` and `diff` webhooks. | the three above, log engine, switches |
 | `configs/schedule.json` | The schedule: time, timezone, weekdays_only, catch_up_until. | |
 | `tests/test_qqqholdings.py` | Tests for diff, parsing, fetch retry, job flow, idempotence, registration. (Scheduler tests are in `tests/test_scheduler.py`.) | |
 
-The two webhooks are registered in `configs/config.json` like the existing jobs:
-`/webhook/qqqholdings/run` and `/webhook/qqqholdings/read`, both with
-`require_secret: true`.
+The three webhooks are registered in `configs/config.json` like the existing jobs:
+`/webhook/qqqholdings/run`, `/webhook/qqqholdings/read` and `/webhook/qqqholdings/diff`,
+all with `require_secret: true`.
 
 ## Data flow
 
@@ -59,10 +59,24 @@ threshold (default 0.01 pp) is ignored as noise.
 All writes are atomic (temp file, then rename), so a crash never leaves a partial
 snapshot that the next run would diff against.
 
-### Read webhook
+### Read and diff webhooks
 
-`/webhook/qqqholdings/read` returns the latest report, or the one for a given `date`,
-as JSON or text. The later iMessage step can use it unchanged.
+`/webhook/qqqholdings/read` returns the holdings of one snapshot, ranked from the
+highest weight to the lowest (ties by ticker): the newest snapshot, or the one for a
+given `date` (YYYY-MM-DD). Each row has `rank`, `ticker`, `name`, `weight` and
+`shares`; the response also carries `count`, `total_weight` and a text table in
+`message`. An unknown date is `not_found`.
+
+`/webhook/qqqholdings/diff` returns a report (added / removed / weight changes)
+computed from the saved snapshots, not read back from a saved report file. With no
+params it compares the newest snapshot with the second newest. With both `first_date`
+(the older, base side) and `second_date` (the newer side) it compares those two
+snapshots, literally in the order given: reversed dates give the inverse report, they
+are not swapped. Giving only one of the two is an error, and fewer than two saved
+snapshots (or an unknown date) is `not_found`. The optional `threshold` is validated
+exactly as for `run`. `run` still saves the daily report files; `diff` is what makes
+the comparison available for any pair of saved dates. The later iMessage step can use
+either webhook unchanged.
 
 ## Failure handling
 

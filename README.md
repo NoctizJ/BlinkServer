@@ -432,11 +432,25 @@ saves a baseline.
 curl -X POST http://localhost:5050/webhook/qqqholdings/run \
   -H "X-Webhook-Secret: $SECRET"
 
-# Read the latest report, or one by date
+# The holdings themselves, largest weight first (the newest snapshot, or one by date)
 curl -X POST http://localhost:5050/webhook/qqqholdings/read \
   -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
   -d '{"date": "2026-10-30"}'
+
+# What changed: no params compares the newest snapshot with the one before it
+curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
+  -H "X-Webhook-Secret: $SECRET"
+
+# ...or any two saved snapshots (first_date is the older side), with an optional threshold
+curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
+  -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
+  -d '{"first_date": "2026-10-28", "second_date": "2026-10-30", "threshold": 0.05}'
 ```
+
+`read` lists every holding of one snapshot with its rank, ticker, name, weight and
+shares. `diff` computes the report from the saved snapshots, so it works for any two
+saved dates; give both `first_date` and `second_date` or neither. `run` still saves
+that day's report under `stock/` (the table above).
 
 Turn it off with `POST /jobs/qqqholdings_job/disable` (send the same `X-Webhook-Secret`
 header as above): that stops both webhooks and the scheduled run. A job that is switched
