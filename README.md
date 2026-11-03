@@ -35,6 +35,8 @@ server code.
   phone with a switch per person — see [Location log](#location-log)
 - Leaving/arriving notification titles postfixed `(A)`/`(D)` for arm/disarm,
   depending on whether anyone is still home — see [Arm/disarm postfix](#armdisarm-postfix)
+- **Several notification devices**, each able to opt out of a kind of notification
+  — see [Notification devices](#notification-devices)
 
 ## Installation
 
@@ -69,7 +71,7 @@ clone and shows up in diffs:
 ```json
 {
     "blink":  { "panel_AMS": "alarm_control_panel.blink_NAME" },
-    "notify": { "target":    "mobile_app_YOUR_PHONE" },
+    "notify": { "devices": [ { "target": "mobile_app_YOUR_PHONE" } ] },
     "lutron": {
         "lights": { "kitchen": "light.kitchen_main" },
         "scenes": { "movie":   "scene.movie_night" }
@@ -85,11 +87,10 @@ Keys that differ per house carry the **home name**, using the same names as
 house `M` adds `panel_M` beside it. One phone is shared by every home, so
 `notify.target` carries no home name.
 
-The `notify.target` entry (e.g. `mobile_app_aisingioro`) is only needed for the
-phone notification webhooks (`/webhook/notify/*`); it names the Home Assistant
-`notify` service target for your phone. The notification titles and messages are
-configurable in **`configs/notify_config.json`**, which also controls whether each
-event arms/disarms the alarm panel:
+The `notify.devices` list names the Home Assistant `notify` service targets that
+get notified — see [Notification devices](#notification-devices). The notification
+titles and messages are configurable in **`configs/notify_config.json`**, which
+also controls whether each event arms/disarms the alarm panel:
 
 ```json
 {
@@ -118,6 +119,54 @@ event arms/disarms the alarm panel:
 - Each request may also override `title`, `message`, and the `arm`/`disarm` flag
   in its JSON body. Precedence is payload > the event's `homes` block for this
   home > `configs/notify_config.json` > the built-in defaults.
+
+### Notification devices
+
+Every notification goes to **all** the devices listed in `notify.devices` in
+`configs/home_assistant_entities.json`. Each is a Home Assistant `notify` service
+target — the same thing you would put after `notify.` in a service call:
+
+```json
+"notify": {
+    "devices": [
+        { "target": "mobile_app_aisingioro" },
+        { "target": "mobile_app_ipad",          "disable": ["location_update"] },
+        { "target": "mobile_app_partner_phone", "disable": ["blink_arm_status", "location_update"] }
+    ]
+}
+```
+
+A device with no `disable` gets everything. `disable` names **groups**, not
+individual events:
+
+| Group | Covers | Sent by |
+| ----- | ------ | ------- |
+| `home_presence` | `leaving_home`, `arriving_home` | `/webhook/notify/leaving`, `/webhook/notify/arriving` |
+| `blink_arm_status` | `blink_arm`, `blink_disarm` | `/webhook/blink/arm`, `/webhook/blink/disarm` |
+| `location_update` | `location_log` | `/webhook/location/log` |
+
+Those three cover every notification this server sends.
+
+**This is a file you edit on the server.** Deliberately not controllable per
+request and not exposed over HTTP — unlike the switches in
+[Switches](#switches), there is no endpoint to toggle it. Read fresh on every
+notification, so no restart is needed.
+
+Notes:
+
+- **One device failing does not stop the others.** Each is attempted; a bad
+  target or an unreachable device is reported per device in the result while the
+  rest still go out.
+- **A typo in `disable` disables nothing** and is warned about in the log, rather
+  than silently dropping a notification you wanted.
+- **If every device opts out** of a group, the result is `"skipped"` and no
+  request is made.
+- A malformed entry (no `target`, not an object, a `disable` that is not a list)
+  is dropped with a log line rather than taking every notification down.
+- This is separate from the per-person location switches — `location_update`
+  decides *which devices* get a location notification, while
+  `notify_switches.json` → `location_log.<id>` decides *whether one is sent at
+  all* for that person.
 
 ### Arm/disarm postfix
 

@@ -251,7 +251,7 @@ def _run_event(event: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # 2. Send the phone notification (attempted regardless of the alarm result).
     try:
-        result["notify"] = notify_phone(cfg["title"], cfg["message"])
+        result["notify"] = notify_phone(cfg["title"], cfg["message"], event=event)
     except Exception as e:
         error_msg = str(e)
         logger.error("notify_phone failed for %s: %s", event, error_msg)

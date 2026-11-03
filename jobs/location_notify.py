@@ -167,7 +167,7 @@ def notify_location(
     }
 
     try:
-        result = notify_phone(text["title"], text["message"])
+        result = notify_phone(text["title"], text["message"], event=EVENT)
     except Exception as e:  # missing/invalid home_assistant_config.json, network, ...
         error_msg = str(e)
         logger.error("location notification failed for %s: %s", person, error_msg)

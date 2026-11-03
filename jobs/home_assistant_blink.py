@@ -150,7 +150,7 @@ def _notify_blink(action: str, home: str = DEFAULT_HOME) -> Dict[str, Any]:
     message = fill_placeholders(cfg.get("message") or defaults["message"], values)
 
     try:
-        return notify_phone(title, message)
+        return notify_phone(title, message, event=NOTIFY_EVENTS[action])
     except Exception as e:
         error_msg = str(e)
         logger.error("blink %s notification failed: %s", action, error_msg)

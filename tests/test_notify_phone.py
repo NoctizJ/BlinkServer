@@ -32,6 +32,7 @@ FAKE_HA_CONFIG = {
 # so tests that reach notify_phone()/set_alarm() stub them rather than relying on
 # whatever the repo's real entities file happens to hold.
 FAKE_TARGET = "mobile_app_aisingioro"
+FAKE_DEVICES = [{"target": FAKE_TARGET, "disable": []}]
 
 
 class temp_presence_file:
@@ -59,7 +60,7 @@ def test_wrapper_posts_to_notify_service():
     """notify_phone() hits /api/services/notify/<target> with title/message."""
     print("Testing home_assistant_notify.notify_phone()...")
     with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
-            mock.patch.object(han, "notify_target", return_value=FAKE_TARGET), \
+            mock.patch.object(han, "notify_devices", return_value=FAKE_DEVICES), \
             mock.patch.object(han.requests, "post") as post:
         post.return_value = mock.Mock(status_code=200, text="{}")
         result = han.notify_phone("API Test", "Hello from test")
@@ -76,13 +77,141 @@ def test_http_failure_is_reported_not_raised():
     """A non-2xx response returns an error dict rather than raising."""
     print("Testing notify_phone() HTTP failure handling...")
     with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
-            mock.patch.object(han, "notify_target", return_value=FAKE_TARGET), \
+            mock.patch.object(han, "notify_devices", return_value=FAKE_DEVICES), \
             mock.patch.object(han.requests, "post") as post:
         post.return_value = mock.Mock(status_code=401, text="unauthorized")
         result = han.notify_phone("T", "M")
     assert result["status"] == "error"
     assert "401" in result["message"]
     print("  OK: HTTP error reported in the return value")
+
+
+def test_notifications_fan_out_to_every_device():
+    """One notification reaches every device that has not opted out."""
+    print("Testing multi-device fan-out...")
+    devices = [
+        {"target": "phone", "disable": []},
+        {"target": "ipad", "disable": ["location_update"]},
+        {"target": "partner", "disable": ["blink_arm_status", "location_update"]},
+    ]
+
+    def targets(post):
+        return [c.args[0].split("/notify/")[-1] for c in post.call_args_list]
+
+    with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(han, "notify_devices", return_value=devices), \
+            mock.patch.object(han.requests, "post") as post:
+        post.return_value = mock.Mock(status_code=200, text="{}")
+
+        # Every event routes by its group, not by its own name.
+        for event, expected in (
+            ("leaving_home", ["phone", "ipad", "partner"]),
+            ("arriving_home", ["phone", "ipad", "partner"]),
+            ("blink_arm", ["phone", "ipad"]),
+            ("blink_disarm", ["phone", "ipad"]),
+            ("location_log", ["phone"]),
+        ):
+            post.reset_mock()
+            res = han.notify_phone("T", "M", event=event)
+            assert res["status"] == "success", (event, res)
+            assert targets(post) == expected, (event, targets(post))
+
+        # No event at all (a manual test notification) goes everywhere.
+        post.reset_mock()
+        han.notify_phone("T", "M")
+        assert targets(post) == ["phone", "ipad", "partner"], targets(post)
+
+        # Every device opting out means nothing is sent, and it says which group.
+        post.reset_mock()
+        with mock.patch.object(han, "notify_devices",
+                               return_value=[{"target": "only", "disable": ["location_update"]}]):
+            res = han.notify_phone("T", "M", event="location_log")
+            assert res["status"] == "skipped", res
+            assert "location_update" in res["message"], res
+            assert post.call_count == 0
+    print("  OK: routed by group, opt-outs honoured, all-opted-out is skipped")
+
+
+def test_one_failing_device_does_not_stop_the_others():
+    """A device that errors is reported; the rest still get the notification."""
+    print("Testing per-device failure isolation...")
+    devices = [{"target": "phone", "disable": []},
+               {"target": "ipad", "disable": []},
+               {"target": "partner", "disable": []}]
+
+    with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(han, "notify_devices", return_value=devices), \
+            mock.patch.object(han.requests, "post") as post:
+        post.side_effect = lambda url, **kw: mock.Mock(
+            status_code=500 if "ipad" in url else 200, text="boom")
+
+        res = han.notify_phone("T", "M", event="leaving_home")
+        assert res["status"] == "error", res
+        assert post.call_count == 3, "a failure stopped the remaining devices"
+        assert "ipad" in res["message"] and "500" in res["message"], res["message"]
+        outcomes = {d["target"]: d["status"] for d in res["devices"]}
+        assert outcomes == {"phone": "success", "ipad": "error", "partner": "success"}, outcomes
+
+        # An unreachable device is handled the same way as an HTTP error.
+        post.side_effect = han.requests.RequestException("connection refused")
+        res = han.notify_phone("T", "M", event="leaving_home")
+        assert res["status"] == "error", res
+        assert all(d["status"] == "error" for d in res["devices"]), res["devices"]
+    print("  OK: every device attempted, failures reported per device")
+
+
+def test_device_list_is_read_and_validated():
+    """notify.devices is read from the entities file, malformed entries dropped."""
+    print("Testing the device list reader...")
+    with tempfile.TemporaryDirectory() as tmp:
+        entities = Path(tmp) / "home_assistant_entities.json"
+        with mock.patch.object(he, "CONFIG_FILE", str(entities)):
+            # A device with no "disable" gets everything.
+            entities.write_text(json.dumps({"notify": {"devices": [
+                {"target": "phone"},
+                {"target": "  spaced  ", "disable": ["location_update"]},
+                {"target": "", "disable": []},            # no target -> dropped
+                {"disable": ["location_update"]},         # no target -> dropped
+                "not an object",                          # not a dict -> dropped
+                {"target": "bad_disable", "disable": "location_update"},  # not a list
+            ]}}), encoding="utf-8")
+            got = han.notify_devices()
+            assert got == [
+                {"target": "phone", "disable": []},
+                {"target": "spaced", "disable": ["location_update"]},
+                {"target": "bad_disable", "disable": []},
+            ], got
+
+            # An unknown group name is kept but warned about — it disables nothing.
+            entities.write_text(json.dumps({"notify": {"devices": [
+                {"target": "phone", "disable": ["typo_group"]}]}}), encoding="utf-8")
+            device = han.notify_devices()[0]
+            assert han._wants(device, "location_log"), "a typo silently disabled something"
+
+            # Nothing usable at all is a clear error naming the file and key.
+            for broken in ({"notify": {"devices": []}}, {"notify": {}}, {},
+                           {"notify": {"devices": "nope"}}):
+                entities.write_text(json.dumps(broken), encoding="utf-8")
+                try:
+                    han.notify_devices()
+                except ValueError as e:
+                    assert "devices" in str(e) and "home_assistant_entities.json" in str(e), e
+                else:
+                    raise AssertionError(f"expected ValueError for {broken}")
+
+    # The groups cover every event this server actually notifies for.
+    import jobs.home_assistant_blink as hd
+    import jobs.location_notify as ln
+    events = set(hd.NOTIFY_EVENTS.values()) | set(np.EVENT_STATES) | {ln.EVENT}
+    assert events <= set(han.NOTIFY_GROUPS), sorted(events - set(han.NOTIFY_GROUPS))
+    assert set(han.NOTIFY_GROUP_NAMES) == {
+        "home_presence", "blink_arm_status", "location_update"}, han.NOTIFY_GROUP_NAMES
+
+    # And the shipped config uses the list shape.
+    shipped = json.loads(
+        (Path(__file__).parent.parent / "configs" / "home_assistant_entities.json").read_text())
+    assert isinstance(shipped["notify"]["devices"], list), shipped["notify"]
+    print("  OK: list read and validated, every event grouped, config shape right")
 
 
 def test_config_precedence():
@@ -671,14 +800,14 @@ def test_entity_references():
                     "panel_AMS": "alarm_control_panel.ams",
                     "panel_M": "alarm_control_panel.cabin",
                 },
-                "notify": {"target": "mobile_app_phone"},
+                "notify": {"devices": [{"target": "mobile_app_phone"}]},
                 "lutron": {"lights": {"k": "light.k"}, "scenes": {}},
             }), encoding="utf-8")
 
             # The panel key carries the home name, defaulting to DEFAULT_HOME.
             assert hd.panel_entity() == "alarm_control_panel.ams"
             assert hd.panel_entity("M") == "alarm_control_panel.cabin"
-            assert han.notify_target() == "mobile_app_phone"
+            assert han.notify_devices() == [{"target": "mobile_app_phone", "disable": []}]
             assert he.aliases("lutron", "lights") == {"k": "light.k"}
 
             # A home with no panel is a clear error naming the key it wanted.
@@ -693,7 +822,7 @@ def test_entity_references():
             # Nothing falls back to the old home_assistant_config.json keys.
             entities.write_text(json.dumps({"blink": {}, "notify": {}}), encoding="utf-8")
             assert not hasattr(he, "LEGACY_CONFIG_FILE"), "legacy fallback still present"
-            for call in (hd.panel_entity, han.notify_target):
+            for call in (hd.panel_entity, han.notify_devices):
                 try:
                     call()
                 except ValueError as e:
@@ -753,7 +882,7 @@ def test_panel_is_routed_per_home():
                 f"panel_{ps.DEFAULT_HOME}": "alarm_control_panel.ams",
                 "panel_M": "alarm_control_panel.cabin",
             },
-            "notify": {"target": FAKE_TARGET},
+            "notify": {"devices": [{"target": FAKE_TARGET}]},
         }), encoding="utf-8")
 
         def entity_of(post):
@@ -850,6 +979,9 @@ def test_presence_store_survives_a_corrupt_file():
 if __name__ == "__main__":
     test_wrapper_posts_to_notify_service()
     test_http_failure_is_reported_not_raised()
+    test_notifications_fan_out_to_every_device()
+    test_one_failing_device_does_not_stop_the_others()
+    test_device_list_is_read_and_validated()
     test_config_precedence()
     test_title_postfix_tracks_who_is_left_at_home()
     test_postfix_uses_this_events_state_not_just_the_store()

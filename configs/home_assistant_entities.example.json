@@ -4,7 +4,24 @@
     "panel_M": "alarm_control_panel.blink_cabin"
   },
   "notify": {
-    "target": "mobile_app_aisingioro"
+    "devices": [
+      {
+        "target": "mobile_app_aisingioro"
+      },
+      {
+        "target": "mobile_app_ipad",
+        "disable": [
+          "location_update"
+        ]
+      },
+      {
+        "target": "mobile_app_partner_phone",
+        "disable": [
+          "blink_arm_status",
+          "location_update"
+        ]
+      }
+    ]
   },
   "lutron": {
     "lights": {
