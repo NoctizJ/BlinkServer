@@ -57,6 +57,7 @@ desktop.ini
 
 # Uploaded files (never commit user uploads)
 files/
+audio/
 
 # Runtime presence state (who is home / away)
 state/
