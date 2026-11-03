@@ -61,6 +61,9 @@ files/
 # Runtime presence state (who is home / away)
 state/
 
+# Runtime QQQ holdings snapshots and reports
+stock/
+
 # Local config (contains secrets — never commit)
 credentials.json
 configs/home_assistant_config.json

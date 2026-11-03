@@ -125,6 +125,18 @@
       "module": "jobs.airplay_speak",
       "function": "purge",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/qqqholdings/run",
+      "module": "jobs.qqqholdings_job",
+      "function": "run",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/qqqholdings/read",
+      "module": "jobs.qqqholdings_job",
+      "function": "read",
+      "require_secret": true
     }
   ]
 }
