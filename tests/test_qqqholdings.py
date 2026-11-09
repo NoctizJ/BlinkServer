@@ -327,9 +327,14 @@ class temp_stock:
         self._patches = [
             mock.patch.object(qj, "STOCK_DIR", self.dir),
             mock.patch.object(qj, "write_log"),
+            # Every run is isolated from phone notifications: a test that reached the real
+            # notify_changes would send a real alert through Home Assistant.
+            mock.patch.object(qj, "notify_changes",
+                              mock.Mock(return_value={"status": "skipped", "message": "test"})),
         ]
         started = [patch.start() for patch in self._patches]
-        self.log = started[1]  # the write_log mock
+        self.log = started[1]     # the write_log mock
+        self.notify = started[2]  # the notify_changes mock
         return self
 
     def __exit__(self, *exc):
@@ -758,6 +763,102 @@ def test_parse_real_invesco_response():
     assert holdings["ASML"]["name"] == "ASML Holding NV", holdings["ASML"]
     skipped = {"USD", "NQZ6", "USDPDV"}
     assert not skipped & set(holdings), skipped & set(holdings)
+    print("  OK")
+
+
+def _two_days(stock, day2=DAY2, as_of2="2026-10-30"):
+    with _fetch_returns("2026-10-29", DAY1):
+        qj.run({})
+    stock.notify.reset_mock()
+    with _fetch_returns(as_of2, day2):
+        return qj.run({})
+
+
+def test_baseline_run_does_not_notify():
+    print("Testing no notification on the baseline...")
+    with temp_stock() as stock, _fetch_returns("2026-10-29", DAY1):
+        res = qj.run({})
+        assert res["status"] == "ok" and res["baseline"] is True, res
+        assert stock.notify.call_count == 0
+        assert "notification" not in res, res
+    print("  OK")
+
+
+def test_added_and_removed_tickers_notify_once_after_the_save():
+    print("Testing notification on added/removed tickers...")
+    seen = {}
+
+    def check(report):
+        # At call time the snapshot is saved and the run lock is free.
+        seen["snapshot"] = (qj.STOCK_DIR / "qqqholdings_2026-10-30.json").exists()
+        seen["locked"] = qj._RUN_LOCK.locked()
+        return {"status": "success", "message": "sent"}
+
+    with temp_stock() as stock:
+        stock.notify.side_effect = check
+        res = _two_days_with_side_effect(stock)
+        assert res["status"] == "ok", res
+        assert stock.notify.call_count == 1, stock.notify.call_args_list
+        report = stock.notify.call_args.args[0]
+        assert report["as_of"] == "2026-10-30" and report["previous_as_of"] == "2026-10-29", report
+        assert [r["ticker"] for r in report["added"]] == ["NEW"], report
+        assert [r["ticker"] for r in report["removed"]] == ["OLD"], report
+        assert res["notification"] == {"status": "success", "message": "sent"}, res
+        assert seen == {"snapshot": True, "locked": False}, seen
+    print("  OK")
+
+
+def _two_days_with_side_effect(stock):
+    with _fetch_returns("2026-10-29", DAY1):
+        qj.run({})
+    stock.notify.reset_mock()  # keeps side_effect
+    with _fetch_returns("2026-10-30", DAY2):
+        return qj.run({})
+
+
+def test_weight_only_change_does_not_notify():
+    print("Testing no notification for a weight-only change...")
+    nudged = dict(DAY1, NVDA=_h("NVIDIA Corp", 9.50, 100.0))
+    with temp_stock() as stock:
+        res = _two_days(stock, nudged)
+        assert res["status"] == "ok" and res["changed"] == 1 and res["added"] == 0, res
+        assert stock.notify.call_count == 0
+        assert "notification" not in res, res
+    print("  OK")
+
+
+def test_no_new_data_does_not_notify():
+    print("Testing no notification when there is no new data...")
+    with temp_stock() as stock:
+        res = _two_days(stock, DAY2, as_of2="2026-10-29")
+        assert res["status"] == "no_new_data", res
+        assert stock.notify.call_count == 0
+        assert "notification" not in res, res
+    print("  OK")
+
+
+def test_notify_changes_raising_does_not_fail_the_run():
+    print("Testing a raising notifier...")
+    with temp_stock() as stock:
+        stock.notify.side_effect = RuntimeError("boom")
+        res = _two_days_with_side_effect(stock)
+        assert res["status"] == "ok", res
+        assert res["notification"]["status"] == "error", res
+        assert "boom" in res["notification"]["message"], res
+        assert stock.log.call_count >= 1
+        assert any("notification error" in str(c) for c in stock.log.call_args_list), \
+            stock.log.call_args_list
+        assert (qj.STOCK_DIR / "qqqholdings_report_2026-10-30.json").exists()
+    print("  OK")
+
+
+def test_notify_changes_error_result_does_not_fail_the_run():
+    print("Testing an error result from the notifier...")
+    with temp_stock() as stock:
+        stock.notify.return_value = {"status": "error", "message": "HA down", "error": "x"}
+        res = _two_days(stock)
+        assert res["status"] == "ok", res
+        assert res["notification"] == {"status": "error", "message": "HA down"}, res
     print("  OK")
 
 

@@ -66,6 +66,7 @@ NOTIFY_GROUPS = {
     "blink_arm": "blink_arm_status",
     "blink_disarm": "blink_arm_status",
     "location_log": "location_update",
+    "qqqholdings_change": "holdings_change",
 }
 
 # Every group name, for validating a "disable" list.

@@ -132,6 +132,24 @@ def test_notifications_fan_out_to_every_device():
     print("  OK: routed by group, opt-outs honoured, all-opted-out is skipped")
 
 
+def test_holdings_change_can_be_opted_out_per_device():
+    """A device with disable: ["holdings_change"] skips the QQQ holdings alert only."""
+    print("Testing the holdings_change opt-out...")
+    devices = [{"target": "phone", "disable": []},
+               {"target": "ipad", "disable": ["holdings_change"]}]
+    with mock.patch.object(han, "_load_ha_config", return_value=FAKE_HA_CONFIG), \
+            mock.patch.object(han, "notify_devices", return_value=devices), \
+            mock.patch.object(han.requests, "post") as post:
+        post.return_value = mock.Mock(status_code=200, text="{}")
+        res = han.notify_phone("T", "M", event="qqqholdings_change")
+        assert res["status"] == "success", res
+        assert [c.args[0].split("/notify/")[-1] for c in post.call_args_list] == ["phone"]
+        post.reset_mock()
+        han.notify_phone("T", "M", event="location_log")
+        assert [c.args[0].split("/notify/")[-1] for c in post.call_args_list] == ["phone", "ipad"]
+    print("  OK")
+
+
 def test_one_failing_device_does_not_stop_the_others():
     """A device that errors is reported; the rest still get the notification."""
     print("Testing per-device failure isolation...")
@@ -205,7 +223,8 @@ def test_device_list_is_read_and_validated():
     events = set(hd.NOTIFY_EVENTS.values()) | set(np.EVENT_STATES) | {ln.EVENT}
     assert events <= set(han.NOTIFY_GROUPS), sorted(events - set(han.NOTIFY_GROUPS))
     assert set(han.NOTIFY_GROUP_NAMES) == {
-        "home_presence", "blink_arm_status", "location_update"}, han.NOTIFY_GROUP_NAMES
+        "home_presence", "blink_arm_status", "location_update",
+        "holdings_change"}, han.NOTIFY_GROUP_NAMES
 
     # And the shipped config uses the list shape.
     shipped = json.loads(
@@ -980,6 +999,7 @@ if __name__ == "__main__":
     test_wrapper_posts_to_notify_service()
     test_http_failure_is_reported_not_raised()
     test_notifications_fan_out_to_every_device()
+    test_holdings_change_can_be_opted_out_per_device()
     test_one_failing_device_does_not_stop_the_others()
     test_device_list_is_read_and_validated()
     test_config_precedence()

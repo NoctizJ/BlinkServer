@@ -92,6 +92,30 @@ either webhook unchanged.
 - A job that is switched off at its slot is skipped for the day (not retried).
 - On/off switch in `configs/job_switches.json`, like the other jobs.
 
+## Phone notification
+
+- **When:** after a `run` that found new data in which at least one ticker was added to
+  or removed from the fund. Not for weight-only changes, the first baseline run,
+  `no_new_data` or errors. The scheduled 06:30 run and a manual
+  `POST /webhook/qqqholdings/run` both go through `run`, so both can notify.
+- **Text:** title `QQQ holdings changed — {as_of}`; the body has an `Added: ...` line and a
+  `Removed: ...` line (a side with nothing is omitted), tickers comma-separated as
+  `ZZZZ (Example New Co, 0.42%)` and `ALNY (Alnylam Pharmaceuticals Inc, was 0.10%)`.
+  Overridable under the `qqqholdings_change` event in `configs/notify_config.json`
+  (`title`, `message`) with placeholders `{as_of}`, `{previous_as_of}`, `{added_count}`,
+  `{removed_count}` and `{changes}`.
+- **Devices and switches:** sent through `notify_phone`, so it goes to the same devices as
+  every other notification. A device opts out with `"disable": ["holdings_change"]` (a new
+  group for the event). The master `notify_phone` job switch and the Home Assistant
+  `notify` feature switch turn it off.
+- **Best effort:** a failure is logged (log type `qqqholdings`) and shown in the run result
+  as `"notification": {"status": ..., "message": ...}`; `run` still returns `status: "ok"`
+  and nothing is retried. Nothing about notifying can raise out of `run`.
+- **Ordering:** the notification is sent after the report and snapshot are saved and outside
+  the run lock, so a slow Home Assistant (up to 30 s per device) can neither block another
+  run nor undo the saved report.
+- Implemented in `jobs/qqqholdings_notify.py`, called from `jobs/qqqholdings_job.py`.
+
 ## Testing
 
 Same style as the existing `tests/`:

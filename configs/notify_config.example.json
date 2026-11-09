@@ -35,5 +35,9 @@
   "blink_disarm": {
     "title": "Blink Control {home} (D)",
     "message": ""
+  },
+  "qqqholdings_change": {
+    "title": "QQQ holdings changed — {as_of}",
+    "message": "{changes}"
   }
 }
