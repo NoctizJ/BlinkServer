@@ -37,6 +37,9 @@ server code.
   depending on whether anyone is still home — see [Arm/disarm postfix](#armdisarm-postfix)
 - **Several notification devices**, each able to opt out of a kind of notification
   — see [Notification devices](#notification-devices)
+- **QQQ holdings report** — every weekday at 6:30 AM Pacific the server downloads the
+  QQQ holdings, compares them with the previous snapshot and saves what was added,
+  removed and re-weighted — see [QQQ holdings](#qqq-holdings)
 
 ## Installation
 
@@ -399,6 +402,70 @@ Put a long, random string in it:
 
 See [Home-Assistant-Setup.md](docs/Home-Assistant-Setup.md) for how to run Home
 Assistant and generate a token.
+
+## QQQ holdings
+
+Every weekday at 6:30 AM Pacific the server downloads the QQQ holdings list from
+Invesco and compares it with the previous snapshot. The schedule is in
+`configs/schedule.json`; the scheduler thread starts with `python3 app.py`.
+
+The report lists the tickers **added**, the tickers **removed**, and the **weight
+changes** (in percentage points) of tickers that stayed, biggest move first. Moves
+under 0.01 pp are ignored; pass `{"threshold": 0.05}` to `run` to change that.
+
+Files are written to `stock/` (not committed), named by the as-of date inside
+Invesco's file:
+
+| File | Contents |
+| ---- | -------- |
+| `qqqholdings_<date>.json` | the day's holdings |
+| `qqqholdings_report_<date>.json` | the structured report |
+| `qqqholdings_report_<date>.txt` | the same report as text |
+
+"Yesterday" means the previous snapshot on disk, so Monday compares against Friday.
+If Invesco's as-of date has not moved (a market holiday, or the file is not
+published yet) the run writes nothing and reports `no_new_data`. The first run only
+saves a baseline.
+
+```bash
+# Run it now (the same thing the scheduler does)
+curl -X POST http://localhost:5050/webhook/qqqholdings/run \
+  -H "X-Webhook-Secret: $SECRET"
+
+# The holdings themselves, largest weight first (the newest snapshot, or one by date)
+curl -X POST http://localhost:5050/webhook/qqqholdings/read \
+  -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
+  -d '{"date": "2026-10-30"}'
+
+# What changed: no params compares the newest snapshot with the one before it
+curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
+  -H "X-Webhook-Secret: $SECRET"
+
+# ...or any two saved snapshots (first_date is the older side), with an optional threshold
+curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
+  -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
+  -d '{"first_date": "2026-10-28", "second_date": "2026-10-30", "threshold": 0.05}'
+```
+
+`read` lists every holding of one snapshot with its rank, ticker, name, weight and
+shares. `diff` computes the report from the saved snapshots, so it works for any two
+saved dates; give both `first_date` and `second_date` or neither. `run` still saves
+that day's report under `stock/` (the table above).
+
+Turn it off with `POST /jobs/qqqholdings_job/disable` (send the same `X-Webhook-Secret`
+header as above): that stops both webhooks and the scheduled run. A job that is switched
+off at its slot is skipped, not retried; after switching it back on, restart the server
+before 12:00 Pacific to make up the run.
+
+A missed or failed run is made up for, but only on a weekday before 12:00 Pacific and
+only if it has not already succeeded that day: if the server was down at 6:30 it runs
+the job once on startup; if Invesco could not be reached the job is retried every 15
+minutes; and a Mac that slept through 6:30 runs it when it wakes. Otherwise the missed
+slot is skipped and the next run is the next weekday. Run history is in
+`state/scheduler.json`; messages are in the `qqqholdings` and `scheduler` log types.
+A mistake in `configs/schedule.json` stops the server from
+starting (the traceback ends with a message saying what is wrong) instead of failing
+at 6:30.
 
 ## Running
 

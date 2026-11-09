@@ -57,9 +57,13 @@ desktop.ini
 
 # Uploaded files (never commit user uploads)
 files/
+audio/
 
 # Runtime presence state (who is home / away)
 state/
+
+# Runtime QQQ holdings snapshots and reports
+stock/
 
 # Local config (contains secrets — never commit)
 credentials.json

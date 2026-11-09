@@ -602,5 +602,12 @@ register_webhooks(app, config)
 
 
 if __name__ == "__main__":
+    # Started here, not at import, so tests that import this module never spawn the
+    # thread. Call it once. A mistake in configs/schedule.json stops the server here,
+    # with a message, rather than failing silently at 06:30.
+    from jobs.qqqholdings_job import run as run_qqqholdings
+    from jobs.scheduler import start_scheduler
+    start_scheduler(run_qqqholdings)
+
     port = int(os.environ.get("PORT", 5050))
     app.run(host="0.0.0.0", port=port)
