@@ -149,6 +149,12 @@
       "module": "jobs.ticker_ohlcv",
       "function": "run",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/ticker/ohlcv/repair",
+      "module": "jobs.ticker_ohlcv_repair",
+      "function": "run",
+      "require_secret": true
     }
   ]
 }

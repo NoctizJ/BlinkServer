@@ -603,11 +603,14 @@ register_webhooks(app, config)
 
 if __name__ == "__main__":
     # Started here, not at import, so tests that import this module never spawn the
-    # thread. Call it once. A mistake in configs/schedule.json stops the server here,
-    # with a message, rather than failing silently at 06:30.
+    # threads. One scheduler per job, each once. A mistake in either schedule file
+    # (configs/schedule.json, configs/ticker_ohlcv_schedule.json) stops the server here,
+    # with a message, rather than failing silently at the slot.
     from jobs.qqqholdings_job import run as run_qqqholdings
     from jobs.scheduler import start_scheduler
+    from jobs.ticker_ohlcv import SCHEDULE_PATH as OHLCV_SCHEDULE_PATH, run_daily as run_ohlcv_daily
     start_scheduler(run_qqqholdings)
+    start_scheduler(run_ohlcv_daily, OHLCV_SCHEDULE_PATH)
 
     port = int(os.environ.get("PORT", 5050))
     app.run(host="0.0.0.0", port=port)

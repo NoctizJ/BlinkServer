@@ -60,6 +60,10 @@ RETRY_AFTER = datetime.timedelta(minutes=15)
 LOG_TYPE = "scheduler"
 SCHEDULE_KEYS = frozenset({"time", "timezone", "weekdays_only", "catch_up_until"})
 
+# Every scheduler thread records its runs in the same state file;
+# one at a time may read, update and write it.
+_STATE_LOCK = threading.Lock()
+
 
 def _log(text: str) -> None:
     """Log without letting a logging problem break the scheduler thread."""
@@ -161,9 +165,10 @@ class Scheduler:
         return runs if isinstance(runs, dict) else {}
 
     def _record_run(self, day: datetime.date) -> None:
-        runs = self._last_runs()
-        runs[self.name] = day.isoformat()
-        write_atomic(self.state_path, json.dumps(runs, indent=2))
+        with _STATE_LOCK:
+            runs = self._last_runs()
+            runs[self.name] = day.isoformat()
+            write_atomic(self.state_path, json.dumps(runs, indent=2))
 
     # -- running -------------------------------------------------------------
     def _fire(self, now: datetime.datetime) -> Optional[bool]:
@@ -253,7 +258,7 @@ class Scheduler:
 
 
 def start_scheduler(func: Callable[[dict], object], path=None) -> Optional[Scheduler]:
-    """Start the scheduler thread for ``func``; call it once per process.
+    """Start the scheduler thread for ``func``; call it once per job.
 
     Returns None when there is no schedule file. A bad schedule file raises ValueError
     here, at startup, rather than failing at 06:30.
@@ -262,8 +267,10 @@ def start_scheduler(func: Callable[[dict], object], path=None) -> Optional[Sched
     if schedule is None:
         return None
     scheduler = Scheduler(func, schedule)
-    threading.Thread(target=scheduler.run_forever, name="blink-scheduler", daemon=True).start()
-    message = f"scheduled {scheduler.name} daily at {schedule.run_time.strftime('%H:%M')} {schedule.tz}"
+    threading.Thread(target=scheduler.run_forever, name=f"blink-scheduler-{scheduler.name}",
+                     daemon=True).start()
+    run_at = schedule.run_time.strftime("%H:%M")
+    message = f"scheduled {scheduler.name} daily at {run_at} {schedule.tz}"
     logger.info(message)
     _log(message)  # the server only shows warnings by default; this is the proof it started
     return scheduler

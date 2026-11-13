@@ -33,32 +33,32 @@ ticker saved), ``partial`` (some failed) or ``error`` (none saved, or bad argume
 
 import argparse
 import datetime
-import json
 import logging
 import re
 import sys
-import threading
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from jobs import qqqholdings_job
-from jobs.atomic_write import write_atomic
+from jobs import qqqholdings_job, scheduler, ticker_ohlcv_store as store
 from jobs.log_engine import log as write_log
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OHLCV_DIR = REPO_ROOT / "stock" / "ohlcv"
+SCHEDULE_PATH = REPO_ROOT / "configs" / "ticker_ohlcv_schedule.json"
 
 LOG_TYPE = "ticker_ohlcv"
 CURRENT_QQQ = "currentqqq"  # compared in lower case
 DAYS_RE = re.compile(r"^([0-9]+)d?$", re.IGNORECASE)
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-# The symbol is also the file name, so nothing path-like gets through.
-SYMBOL_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.\-=^]{0,14}$")
+DAILY_LOOKBACK_DAYS = 7
+MAX_FAILURES_LOGGED = 10
 
-# Only one fetch at a time may read, merge and write a ticker file.
-_LOCK = threading.Lock()
+# The command-line help for the two arguments, shared with jobs/ticker_ohlcv_repair.py.
+RANGE_HELP = ('"30d" = the last 30 days up to today, or START..END (YYYY-MM-DD, both included); '
+              'START.. runs through today')
+TICKERS_HELP = ("symbols such as AAPL,GOOGL (or AAPL GOOGL), or CurrentQQQ for "
+                "every ticker in the newest saved QQQ holdings list")
 
 
 def _log(text: str) -> None:
@@ -104,7 +104,10 @@ def _current_qqq_tickers() -> List[str]:
     if result["status"] != "ok":
         raise ValueError(f"CurrentQQQ needs a saved QQQ holdings list ({result['message']}); "
                          "run /webhook/qqqholdings/run first")
-    return [row["ticker"] for row in result["holdings"]]
+    tickers = [row["ticker"] for row in result["holdings"]]
+    if not tickers:
+        raise ValueError("the saved QQQ holdings list is empty")
+    return tickers
 
 
 def resolve_tickers(spec: Any) -> List[str]:
@@ -155,21 +158,9 @@ def to_records(df) -> List[dict]:
     } for date, row in df.iterrows()]
 
 
-def merge_records(existing: List[dict], new: List[dict]) -> List[dict]:
-    """Both lists by date, a date present in both taking the ``new`` values, sorted by date."""
-    by_date = {record["date"]: record for record in existing}
-    by_date.update({record["date"]: record for record in new})
-    return [by_date[date] for date in sorted(by_date)]
-
-
-def _load_records(path: Path) -> List[dict]:
-    """A ticker's saved records ([] if it has no file); ValueError if the file is not a record list."""
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list) or not all(isinstance(r, dict) and "date" in r for r in data):
-        raise ValueError(f"{path.name} is not a list of daily records")
-    return data
+def fetch_bars(symbol: str, start: datetime.date, end: datetime.date) -> List[dict]:
+    """Daily records for symbol over start..end (end included), straight from Yahoo."""
+    return to_records(_download(symbol, start, end))
 
 
 def _failed(symbol: str, reason: str) -> dict:
@@ -178,21 +169,17 @@ def _failed(symbol: str, reason: str) -> dict:
 
 def fetch_ticker(symbol: str, start: datetime.date, end: datetime.date) -> dict:
     """Fetch one ticker and merge it into its file; returns a ``saved`` or ``failed`` result."""
-    if not SYMBOL_RE.match(symbol):
+    if not store.SYMBOL_RE.match(symbol):
         return _failed(symbol, "not a valid ticker symbol")
     try:
-        records = to_records(_download(symbol, start, end))
+        records = fetch_bars(symbol, start, end)
         if not records:
             return _failed(symbol, f"no data for {start} .. {end} (no trading days in the range)")
-        path = OHLCV_DIR / f"{symbol}.json"
-        with _LOCK:
-            existing = _load_records(path)
-            merged = merge_records(existing, records)
-            write_atomic(path, json.dumps(merged, indent=2))
+        existing_count, merged = store.save_merged(symbol, records)
     except Exception as exc:  # one ticker failing, for any reason, must not stop the others
         return _failed(symbol, f"{type(exc).__name__}: {exc}")
     return {"ticker": symbol, "status": "saved", "fetched": len(records),
-            "added": len(merged) - len(existing), "total": len(merged),
+            "added": len(merged) - existing_count, "total": len(merged),
             "first": merged[0]["date"], "last": merged[-1]["date"]}
 
 
@@ -212,20 +199,25 @@ def format_results(start: datetime.date, end: datetime.date, results: List[dict]
     return "\n".join(lines)
 
 
-def run(payload: Optional[dict] = None) -> dict:
-    """Fetch ``payload["range"]`` of daily history for ``payload["tickers"]`` and save it."""
-    payload = payload or {}
-    try:
-        start, end = parse_range(payload.get("range"))
-        symbols = resolve_tickers(payload.get("tickers"))
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
+def parse_request(payload: dict) -> Tuple[datetime.date, datetime.date, List[str]]:
+    """The (start, end, symbols) a fetch or repair request asks for; ValueError if the request is bad."""
+    start, end = parse_range(payload.get("range"))
+    symbols = resolve_tickers(payload.get("tickers"))
+    return start, end, symbols
 
+
+def fetch_many(start: datetime.date, end: datetime.date, symbols: List[str]) -> dict:
+    """Fetch every symbol over start..end and report it (the result dict ``run`` has always returned)."""
     results = [fetch_ticker(symbol, start, end) for symbol in symbols]
     saved = [r for r in results if r["status"] == "saved"]
     failed = [r for r in results if r["status"] == "failed"]
     message = format_results(start, end, results)
     _log(message.splitlines()[-1])
+    if failed:
+        text = "failed: " + "; ".join(f"{r['ticker']} ({r['reason']})" for r in failed[:MAX_FAILURES_LOGGED])
+        if len(failed) > MAX_FAILURES_LOGGED:
+            text += f"; +{len(failed) - MAX_FAILURES_LOGGED} more"
+        _log(text)
     return {
         "status": "ok" if not failed else ("partial" if saved else "error"),
         "start": start.isoformat(),
@@ -237,17 +229,44 @@ def run(payload: Optional[dict] = None) -> dict:
     }
 
 
+def run(payload: Optional[dict] = None) -> dict:
+    """Fetch ``payload["range"]`` of daily history for ``payload["tickers"]`` and save it."""
+    try:
+        start, end, symbols = parse_request(payload or {})
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    return fetch_many(start, end, symbols)
+
+
+def _schedule_today(now: Optional[datetime.datetime] = None) -> datetime.date:
+    """Today's date in the daily schedule's time zone: the same day the scheduler records the run under."""
+    schedule = scheduler.load_schedule(SCHEDULE_PATH)
+    tz = schedule.tz if schedule else None
+    return (now.astimezone(tz) if now else datetime.datetime.now(tz)).date()
+
+
+def run_daily(payload: Optional[dict] = None, today: Optional[datetime.date] = None) -> dict:
+    """The scheduled job: the last DAILY_LOOKBACK_DAYS days of bars (today included) for every CurrentQQQ ticker.
+
+    The look-back makes every run heal the last week: a ticker that failed yesterday, a day the Mac slept through,
+    or a day Yahoo had not published yet is filled by the next run (the merge makes re-fetching harmless). A run that
+    saved nothing because every ticker failed is an ``error`` and the scheduler retries it; otherwise it is done."""
+    today = today or _schedule_today()
+    try:
+        symbols = resolve_tickers(CURRENT_QQQ)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    return fetch_many(today - datetime.timedelta(days=DAILY_LOOKBACK_DAYS), today, symbols)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """The command line: ``python3 -m jobs.ticker_ohlcv RANGE TICKERS``. Exit 0 only if all saved."""
     parser = argparse.ArgumentParser(
         prog="python3 -m jobs.ticker_ohlcv",
         description="Fetch daily OHLCV history and save it to stock/ohlcv/<SYMBOL>.json "
                     "(merged by date with what is already there).")
-    parser.add_argument("range", help='"30d" = the last 30 days up to today, or START..END '
-                                      '(YYYY-MM-DD, both included); START.. runs through today')
-    parser.add_argument("tickers", nargs="+",
-                        help='symbols such as AAPL,GOOGL (or AAPL GOOGL), or CurrentQQQ for '
-                             'every ticker in the newest saved QQQ holdings list')
+    parser.add_argument("range", help=RANGE_HELP)
+    parser.add_argument("tickers", nargs="+", help=TICKERS_HELP)
     args = parser.parse_args(argv)
     result = run({"range": args.range, "tickers": args.tickers})
     print(result["message"])

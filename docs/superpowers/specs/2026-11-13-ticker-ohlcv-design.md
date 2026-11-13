@@ -56,6 +56,67 @@ hence `yfinance>=0.2.65` in requirements.txt). The real library was called once 
 sandbox, where Yahoo is blocked: it surfaced a clean network error, not a TypeError. Real
 Yahoo data was never fetched.
 
+## Storage module
+
+`jobs/ticker_ohlcv_store.py` owns `stock/ohlcv/`: `SYMBOL_RE`, `merge_records`,
+`load_records(symbol)` (`[]` if there is no file; `ValueError` for an invalid symbol or a
+damaged file) and `save_merged(symbol, records)`, which reads, merges and writes under one
+lock and returns `(days it had before, all records now)`. The fetcher, the daily job and the
+repair tool all go through it. `ticker_ohlcv.fetch_bars(symbol, start, end)` is the public
+"records straight from Yahoo" helper (the repair tool uses it for the QQQ calendar).
+
+## Daily job
+
+`run_daily` (scheduled from `configs/ticker_ohlcv_schedule.json`: 14:30 America/Los_Angeles,
+weekdays, `catch_up_until` 23:00) fetches the last 7 days (`DAILY_LOOKBACK_DAYS`, today
+included) for `CurrentQQQ`, through the same `fetch_many` as the webhook. The job switch is
+the module name, `ticker_ohlcv`, the same as the fetch webhook.
+
+Decisions and reasons:
+
+- **A 7-day look-back, not today only.** The first design fetched only today, so a ticker
+  that failed, a day the Mac slept through, or a day Yahoo had not yet published stayed
+  missing until someone ran repair. With the look-back every run heals the last week; the
+  merge makes the re-fetch harmless.
+- **No holiday detection.** An earlier version treated "every ticker has no data" as a market
+  holiday (`no_new_data`, done, no retry). yfinance raises `YFPricesMissingError` for ANY Yahoo
+  error response (a bad crumb, say), so a Yahoo outage looked like a holiday and was never
+  retried. Now a failed ticker is just failed, a holiday adds nothing (the other days of the
+  window are re-fetched anyway), and a run that saved nothing is an `error` the scheduler
+  retries every 15 minutes until 23:00; a run that saved anything is done, `partial` included.
+- **"Today" is the schedule's date**, not the server's: `_schedule_today` uses the schedule's
+  time zone, the same day the scheduler records the run under.
+- **Failures are logged** (the first 10, then "+N more"), because the scheduler logs only the
+  run's status.
+- An empty saved QQQ list is its own error ("the saved QQQ holdings list is empty"), not
+  "tickers is required".
+
+The two schedulers (QQQ holdings and this job) share `state/scheduler.json`, so recording a
+run holds a module-level lock around the read-modify-write; threads are named
+`blink-scheduler-<job>`.
+
+## Repair
+
+`jobs/ticker_ohlcv_repair.py` (CLI, and `POST /webhook/ticker/ohlcv/repair`, with its own
+switch `ticker_ohlcv_repair`).
+
+- **The calendar is QQQ's own bars over the range**: one extra request, and no holiday list to
+  keep current. A QQQ outage, or QQQ having no bar at all in the range, is an `error` rather
+  than a guess. A single day QQQ lacks is not in the calendar, so it is silently not checked.
+- **A hole** is a calendar day with no bar in a ticker's file (a ticker with no file is missing
+  every day, so repair also backfills). Each ticker with holes is fetched once over first..last
+  hole, merged, and re-checked from disk, so the report shows what actually landed: holes Yahoo
+  cannot supply stay `still_missing`. A ticker listed after the range start therefore stays
+  `partial` on every run.
+- **Today's bar is not trusted before 17:00 New York time.** Yahoo's day bar is partial until
+  the close (16:00 ET) and final by 17:00; saving it would store a half-finished day that no
+  later check notices, because the day then is not a hole. The check stops at
+  `last_final_day`, and a range that ends after it is clamped (the message says so); a range
+  that lies entirely after it is an `error`.
+- Status: `ok` (nothing missing, or all filled), `partial` (holes remain, or a ticker could not
+  be checked, such as a damaged file), `error` (bad arguments, nothing to check yet, or no
+  calendar).
+
 ## The QQQ holdings move
 
 The QQQ holdings files now live in `stock/qqqholdings/`; see the Storage section of the QQQ holdings spec (`2026-11-02-qqqholdings-daily-report-design.md`).
@@ -71,3 +132,7 @@ fetches of one ticker. All downloads are faked.
 Not tested: real Yahoo calls (the development sandbox blocks Yahoo), the real shape of
 yfinance's frame beyond what the fakes imitate, and how long a `CurrentQQQ` fetch of
 about 100 tickers takes.
+
+Also not verified from the sandbox: real Yahoo behaviour for the daily and repair
+requests, the time 101 requests take, and whether Yahoo has the full day's bar at 14:30
+Pacific.

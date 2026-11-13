@@ -13,9 +13,6 @@ import datetime
 import io
 import json
 import sys
-import tempfile
-import threading
-import time
 import types
 from pathlib import Path
 from unittest import mock
@@ -29,37 +26,17 @@ except ImportError:
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-import jobs.qqqholdings_store as qs
 import jobs.ticker_ohlcv as tk
+import ohlcv_helpers as helpers
+from ohlcv_helpers import REC1, holding, raises, rec, temp_qqq, write_snapshot
 
 TODAY = datetime.date(2026, 11, 13)
 D = datetime.date
 
 
-class temp_ohlcv:
+def temp_ohlcv():
     """Point the module at a temp stock/ohlcv dir and mock its logger."""
-
-    def __enter__(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        self.dir = self.root / "stock" / "ohlcv"
-        self._patches = [mock.patch.object(tk, "OHLCV_DIR", self.dir),
-                         mock.patch.object(tk, "write_log")]
-        started = [p.start() for p in self._patches]
-        self.log = started[1]
-        return self
-
-    def __exit__(self, *exc):
-        for p in reversed(self._patches):
-            p.stop()
-        self._tmp.cleanup()
-        return False
-
-    def files(self):
-        return sorted(p.name for p in self.dir.iterdir()) if self.dir.is_dir() else []
-
-    def everything(self):
-        return sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
+    return helpers.temp_ohlcv(tk)
 
 
 def frame(*rows):
@@ -73,12 +50,7 @@ def frame(*rows):
     }, index=index)
 
 
-def rec(date, o, h, l, c, v):
-    return {"date": date, "open": o, "high": h, "low": l, "close": c, "volume": v}
-
-
 DF1 = frame(("2026-11-10", 10.0, 11.0, 9.0, 10.5, 1000), ("2026-11-11", 10.5, 12.0, 10.0, 11.0, 2000))
-REC1 = [rec("2026-11-10", 10.0, 11.0, 9.0, 10.5, 1000), rec("2026-11-11", 10.5, 12.0, 10.0, 11.0, 2000)]
 
 
 def fake_download(table):
@@ -94,14 +66,6 @@ def fake_download(table):
 
     download.calls = calls
     return download
-
-
-def raises(exc_type, fn, *args):
-    try:
-        fn(*args)
-    except exc_type as exc:
-        return exc
-    raise AssertionError(f"{fn.__name__}{args} did not raise {exc_type.__name__}")
 
 
 # ---------------------------------------------------------------- parse_range
@@ -153,30 +117,12 @@ def test_resolve_tickers_rejects_empty():
     print("  OK")
 
 
-def _write_snapshot(folder, as_of, holdings):
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / f"qqqholdings_{as_of}.json").write_text(
-        json.dumps({"as_of": as_of, "holdings": holdings}), encoding="utf-8")
-
-
-def _h(name, weight):
-    return {"name": name, "weight": weight, "shares": 1.0}
-
-
-@contextlib.contextmanager
-def temp_qqq():
-    with tempfile.TemporaryDirectory() as tmp:
-        folder = Path(tmp) / "stock" / "qqqholdings"
-        with mock.patch.object(qs, "STOCK_DIR", folder):
-            yield folder
-
-
 def test_resolve_current_qqq_uses_the_newest_snapshot_in_weight_order():
     print("Testing CurrentQQQ...")
     with temp_qqq() as folder:
-        _write_snapshot(folder, "2026-10-29", {"OLD": _h("Old", 9.0), "AAPL": _h("Apple", 5.0)})
-        _write_snapshot(folder, "2026-10-30", {"AAPL": _h("Apple", 5.0), "NVDA": _h("Nvidia", 9.0),
-                                               "NEW": _h("New", 0.4)})
+        write_snapshot(folder, "2026-10-29", {"OLD": holding("Old", 9.0), "AAPL": holding("Apple", 5.0)})
+        write_snapshot(folder, "2026-10-30", {"AAPL": holding("Apple", 5.0), "NVDA": holding("Nvidia", 9.0),
+                                               "NEW": holding("New", 0.4)})
         for spec in ("CurrentQQQ", "currentqqq", "CURRENTQQQ", " CurrentQQQ "):
             assert tk.resolve_tickers(spec) == ["NVDA", "AAPL", "NEW"], spec
     print("  OK")
@@ -211,22 +157,6 @@ def test_to_records_drops_nan_rows_and_handles_empty():
     assert tk.to_records(df.iloc[0:0]) == []
     assert tk.to_records(pd.DataFrame()) == []
     assert tk.to_records(None) == []
-    print("  OK")
-
-
-# -------------------------------------------------------------- merge_records
-
-def test_merge_records():
-    print("Testing merge_records...")
-    old = [rec("2026-11-12", 3, 3, 3, 3, 3), rec("2026-11-10", 1, 1, 1, 1, 1),
-           rec("2026-11-11", 2, 2, 2, 2, 2)]
-    new = [rec("2026-11-13", 9, 9, 9, 9, 9), rec("2026-11-11", 5, 5, 5, 5, 5)]
-    out = tk.merge_records(old, new)
-    assert [r["date"] for r in out] == ["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"], out
-    assert out[1] == rec("2026-11-11", 5, 5, 5, 5, 5), out
-    assert out[0]["open"] == 1 and out[2]["open"] == 3
-    assert tk.merge_records([], new) == sorted(new, key=lambda r: r["date"])
-    assert tk.merge_records(old, []) == sorted(old, key=lambda r: r["date"])
     print("  OK")
 
 
@@ -323,13 +253,6 @@ def test_fetch_ticker_rejects_path_like_symbols():
     print("  OK")
 
 
-def test_symbol_re_accepts_real_symbol_shapes():
-    print("Testing SYMBOL_RE real symbol shapes...")
-    for symbol in ("AAPL", "BRK-B", "BF.B", "^GSPC", "EURUSD=X", "QQQ"):
-        assert tk.SYMBOL_RE.match(symbol), symbol
-    print("  OK")
-
-
 def test_fetch_ticker_leaves_a_corrupt_file_alone():
     print("Testing fetch_ticker corrupt file...")
     for damage in ("{oops", "[1]", '{"date": "x"}', '[{"close": 1}]'):
@@ -375,7 +298,10 @@ def test_run_partial_reports_each_ticker_in_order():
         assert [ln.split()[0] for ln in lines[:4]] == ["AAA", "BBB", "CCC", "DDD"], lines
         assert "saved" in lines[0] and "FAILED" in lines[1] and "boom" in lines[2], lines
         assert lines[4] == "OHLCV 2026-11-01 .. 2026-11-12: 2 of 4 saved, 2 failed", lines
-        t.log.assert_called_once_with("ticker_ohlcv", lines[4])
+        assert t.log.call_args_list == [
+            mock.call("ticker_ohlcv", lines[4]),
+            mock.call("ticker_ohlcv", "failed: BBB (no data for 2026-11-01 .. 2026-11-12 "
+                                      "(no trading days in the range)); CCC (RuntimeError: boom)")], t.log.call_args_list
     print("  OK")
 
 
@@ -435,7 +361,7 @@ def test_run_current_qqq():
     print("Testing run CurrentQQQ...")
     dl = fake_download({"NVDA": DF1, "AAPL": DF1})
     with temp_ohlcv(), temp_qqq() as folder, mock.patch.object(tk, "_download", dl):
-        _write_snapshot(folder, "2026-10-30", {"AAPL": _h("Apple", 5.0), "NVDA": _h("Nvidia", 9.0)})
+        write_snapshot(folder, "2026-10-30", {"AAPL": holding("Apple", 5.0), "NVDA": holding("Nvidia", 9.0)})
         res = tk.run({"range": "7d", "tickers": "CurrentQQQ"})
         assert res["status"] == "ok" and [c[0] for c in dl.calls] == ["NVDA", "AAPL"], (res, dl.calls)
     print("  OK")
@@ -521,43 +447,238 @@ def test_importing_the_module_does_not_import_yfinance():
     print("  OK")
 
 
-# ---------------------------------------------------------------- concurrency
+# ---------------------------------------------------------------- fetch_bars
 
-def test_concurrent_fetches_of_one_ticker_keep_every_date():
-    print("Testing concurrent fetches...")
-    real = tk.write_atomic
+def test_fetch_bars_returns_records():
+    print("Testing fetch_bars...")
+    dl = fake_download({"AAPL": DF1, "ZZZZ": pd.DataFrame()})
+    with mock.patch.object(tk, "_download", dl):
+        assert tk.fetch_bars("AAPL", D(2026, 11, 10), D(2026, 11, 11)) == REC1
+        assert tk.fetch_bars("ZZZZ", D(2026, 11, 10), D(2026, 11, 11)) == []
+    assert dl.calls[0] == ("AAPL", D(2026, 11, 10), D(2026, 11, 11)), dl.calls
+    print("  OK")
 
-    def slow(path, text):
-        time.sleep(0.03)
-        real(path, text)
 
-    days = [f"2026-11-{n:02d}" for n in range(1, 9)]
-    frames = [frame((day, 1.0, 2.0, 0.5, 1.5, 10)) for day in days]
-    errors = []
-    by_thread = {}   # each worker's frame, found by thread (patching per thread would race)
+# ------------------------------------------------------------- parse_request
+
+def test_parse_request_returns_start_end_and_symbols():
+    print("Testing parse_request...")
+    start, end, symbols = tk.parse_request({"range": "2026-11-01..2026-11-12", "tickers": "aapl, GOOGL"})
+    assert (start, end, symbols) == (D(2026, 11, 1), D(2026, 11, 12), ["AAPL", "GOOGL"]), (start, end, symbols)
+    start, end, symbols = tk.parse_request({"range": "7d", "tickers": ["AAPL"]})
+    assert end == datetime.date.today() and start == end - datetime.timedelta(days=7), (start, end)
+    for payload in ({}, {"tickers": "AAPL"}, {"range": "xx", "tickers": "AAPL"},
+                    {"range": "7d"}, {"range": "7d", "tickers": ""}, {"range": "7d", "tickers": []}):
+        raises(ValueError, tk.parse_request, payload)
+    print("  OK")
+
+
+# ---------------------------------------------------------------- fetch_many
+
+def test_fetch_many_reports_what_run_reports():
+    print("Testing fetch_many...")
+    with temp_ohlcv() as t, mock.patch.object(tk, "_download", fake_download({"AAA": DF1, "BBB": RuntimeError("x")})):
+        res = tk.fetch_many(D(2026, 11, 10), D(2026, 11, 11), ["AAA", "BBB"])
+        assert res["status"] == "partial" and res["requested"] == 2, res
+        assert res["start"] == "2026-11-10" and res["end"] == "2026-11-11", res
+        assert [r["ticker"] for r in res["saved"]] == ["AAA"] and [r["ticker"] for r in res["failed"]] == ["BBB"], res
+        assert "no_data" not in res["failed"][0], res
+    print("  OK")
+
+
+# ------------------------------------------------------------------ run_daily
+
+class YFPricesMissingError(Exception):
+    """Named like yfinance's, which raises it for ANY Yahoo error response (a bad crumb, say)."""
+
+
+SNAPSHOT = {"AAPL": holding("Apple", 5.0), "NVDA": holding("Nvidia", 9.0), "MSFT": holding("Microsoft", 7.0)}
+SNAPSHOT_ORDER = ["NVDA", "MSFT", "AAPL"]
+LOOKBACK = datetime.timedelta(days=7)
+
+
+def _daily(table, today=TODAY, snapshot=SNAPSHOT):
+    dl = fake_download(table)
+    with temp_ohlcv() as t, temp_qqq() as folder, mock.patch.object(tk, "_download", dl):
+        write_snapshot(folder, "2026-10-30", snapshot)
+        res = tk.run_daily(today=today)
+        return res, dl, t, t.everything(), t.log
+
+
+def test_run_daily_asks_for_the_last_seven_days_for_every_ticker():
+    print("Testing run_daily ok...")
+    assert tk.DAILY_LOOKBACK_DAYS == 7
+    res, dl, t, _, _ = _daily({s: DF1 for s in SNAPSHOT})
+    assert res["status"] == "ok" and res["requested"] == 3, res
+    assert dl.calls == [(s, TODAY - LOOKBACK, TODAY) for s in SNAPSHOT_ORDER], dl.calls
+    assert res["start"] == "2026-11-06" and res["end"] == "2026-11-13", res
+    print("  OK")
+
+
+def test_run_daily_a_few_failures_are_partial():
+    print("Testing run_daily partial...")
+    table = {"NVDA": DF1, "MSFT": ConnectionError("down"), "AAPL": DF1}
+    res, _, _, _, _ = _daily(table)
+    assert res["status"] == "partial" and [r["ticker"] for r in res["failed"]] == ["MSFT"], res
+    assert "no_data" not in res["failed"][0], res
+    print("  OK")
+
+
+def test_run_daily_a_market_holiday_is_ok():
+    print("Testing run_daily holiday...")
+    # Every ticker has the earlier days but nothing for the last one: just ok, nothing special.
+    res, dl, t, written, _ = _daily({s: DF1 for s in SNAPSHOT})
+    assert res["status"] == "ok" and res["failed"] == [], res
+    assert all(r["last"] == "2026-11-11" for r in res["saved"]), res
+    print("  OK")
+
+
+def test_run_daily_a_yahoo_outage_is_an_error_not_a_holiday():
+    print("Testing run_daily Yahoo outage...")
+    outage = YFPricesMissingError('(Yahoo error = "Invalid Crumb")')
+    res, _, t, written, _ = _daily({s: outage for s in SNAPSHOT})
+    assert res["status"] == "error" and len(res["failed"]) == 3 and res["saved"] == [], res
+    assert all(r["reason"].startswith("YFPricesMissingError:") and "Invalid Crumb" in r["reason"]
+               for r in res["failed"]), res
+    assert [p for p in written if p.startswith("stock/ohlcv")] == [], written
+    print("  OK")
+
+
+def test_run_daily_every_ticker_failing_is_an_error_so_the_scheduler_retries():
+    print("Testing run_daily errors...")
+    res, _, t, written, _ = _daily({s: ConnectionError("down") for s in SNAPSHOT})
+    assert res["status"] == "error" and len(res["failed"]) == 3, res
+    assert [p for p in written if p.startswith("stock/ohlcv")] == [], written
+    print("  OK")
+
+
+def test_run_daily_without_a_saved_qqq_list_is_an_error():
+    print("Testing run_daily without a snapshot...")
+    dl = fake_download({})
+    with temp_ohlcv(), temp_qqq(), mock.patch.object(tk, "_download", dl):
+        res = tk.run_daily(today=TODAY)
+        assert res["status"] == "error" and "/webhook/qqqholdings/run" in res["message"], res
+        assert dl.calls == [], dl.calls
+    print("  OK")
+
+
+def test_run_daily_with_an_empty_qqq_list_says_so():
+    print("Testing run_daily with an empty list...")
+    res, dl, _, _, _ = _daily({}, snapshot={})
+    assert res == {"status": "error", "message": "the saved QQQ holdings list is empty"}, res
+    assert dl.calls == [], dl.calls
+    print("  OK")
+
+
+def test_each_daily_run_heals_the_days_an_earlier_run_missed():
+    print("Testing run_daily self-healing...")
+    bars = {"NVDA": ["2026-11-12", "2026-11-13"], "MSFT": ["2026-11-12", "2026-11-13"]}
 
     def download(symbol, start, end):
-        return by_thread[threading.get_ident()]
+        if failing and symbol == failing[0]:
+            raise ConnectionError("down")
+        days = [d for d in bars[symbol] if start.isoformat() <= d <= end.isoformat()]
+        return frame(*[(d, 1.0, 2.0, 0.5, 1.5, 10) for d in days]) if days else pd.DataFrame()
 
-    def worker(df):
-        try:
-            by_thread[threading.get_ident()] = df
-            res = tk.fetch_ticker("AAPL", D(2026, 11, 1), D(2026, 11, 8))
-            assert res["status"] == "saved", res
-        except BaseException as exc:  # reported below, not lost in the thread
-            errors.append(exc)
+    failing = ["MSFT"]
+    with temp_ohlcv() as t, temp_qqq() as folder, mock.patch.object(tk, "_download", download):
+        write_snapshot(folder, "2026-10-30", {"NVDA": holding("Nvidia", 9.0), "MSFT": holding("Microsoft", 7.0)})
+        day1 = tk.run_daily(today=D(2026, 11, 12))
+        assert day1["status"] == "partial" and [r["ticker"] for r in day1["failed"]] == ["MSFT"], day1
+        assert t.files() == ["NVDA.json"], t.files()
+        failing.clear()
+        day2 = tk.run_daily(today=D(2026, 11, 13))
+        assert day2["status"] == "ok", day2
+        assert [r["date"] for r in json.loads((t.dir / "MSFT.json").read_text())] == ["2026-11-12", "2026-11-13"]
+        assert [r["date"] for r in json.loads((t.dir / "NVDA.json").read_text())] == ["2026-11-12", "2026-11-13"]
+    print("  OK")
 
-    with temp_ohlcv() as t, mock.patch.object(tk, "write_atomic", side_effect=slow), \
-            mock.patch.object(tk, "_download", download):
-        threads = [threading.Thread(target=worker, args=(df,)) for df in frames]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        assert not errors, errors
-        saved = json.loads((t.dir / "AAPL.json").read_text())
-        assert [r["date"] for r in saved] == days, saved
-        assert t.files() == ["AAPL.json"], t.files()
+
+def test_failed_tickers_get_one_log_entry_capped_at_ten():
+    print("Testing the failed-ticker log entry...")
+    names = [f"T{n:02d}" for n in range(1, 14)]
+    snapshot = {name: holding(name, 100.0 - n) for n, name in enumerate(names)}
+
+    def fails(count):
+        return {name: (ConnectionError(f"down {name}") if n < count else DF1) for n, name in enumerate(names)}
+
+    res, _, _, _, log = _daily(fails(0), snapshot=snapshot)
+    assert log.call_count == 1, log.call_args_list      # nothing failed: only the summary line
+
+    res, _, _, _, log = _daily(fails(2), snapshot=snapshot)
+    assert log.call_args_list == [
+        mock.call("ticker_ohlcv", "OHLCV 2026-11-06 .. 2026-11-13: 11 of 13 saved, 2 failed"),
+        mock.call("ticker_ohlcv", "failed: T01 (ConnectionError: down T01); T02 (ConnectionError: down T02)")
+    ], log.call_args_list
+
+    res, _, _, _, log = _daily(fails(12), snapshot=snapshot)
+    assert log.call_count == 2, log.call_args_list
+    text = log.call_args_list[1][0][1]
+    assert text == "failed: " + "; ".join(f"T{n:02d} (ConnectionError: down T{n:02d})"
+                                         for n in range(1, 11)) + "; +2 more", text
+    assert "T11" not in text and "T12" not in text, text
+
+    res, _, _, _, log = _daily(fails(10), snapshot=snapshot)
+    assert not log.call_args_list[1][0][1].endswith("more"), log.call_args_list
+    print("  OK")
+
+
+def test_run_daily_uses_the_schedule_date_when_given_no_date():
+    print("Testing run_daily default date...")
+    dl = fake_download({s: DF1 for s in SNAPSHOT})
+    with temp_ohlcv(), temp_qqq() as folder, mock.patch.object(tk, "_download", dl), \
+            mock.patch.object(tk, "_schedule_today", return_value=D(2026, 11, 13)):
+        write_snapshot(folder, "2026-10-30", SNAPSHOT)
+        assert tk.run_daily({})["status"] == "ok"
+        assert dl.calls[0] == ("NVDA", D(2026, 11, 6), D(2026, 11, 13)), dl.calls
+    print("  OK")
+
+
+def test_schedule_today_is_the_schedule_zone_whatever_the_process_zone_is():
+    print("Testing _schedule_today time zone...")
+    from zoneinfo import ZoneInfo
+    import os
+    import time
+    la_evening = datetime.datetime(2026, 11, 13, 21, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+
+    class FakeDateTime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):    # the real clock, frozen at la_evening
+            return la_evening.astimezone(tz) if tz else la_evening.astimezone()
+
+    class FakeDate(datetime.date):
+        @classmethod
+        def today(cls):           # the process zone's date, like the real date.today()
+            return FakeDateTime.now().date()
+
+    fake_module = types.SimpleNamespace(datetime=FakeDateTime, date=FakeDate, timedelta=datetime.timedelta)
+    old_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        # 21:30 Pacific on the 13th is already 00:30 on the 14th in New York.
+        assert la_evening.astimezone().date() == D(2026, 11, 14), la_evening.astimezone()
+        assert FakeDate.today() == D(2026, 11, 14)
+        assert tk._schedule_today(now=la_evening) == D(2026, 11, 13)
+        with mock.patch.object(tk, "datetime", fake_module):
+            assert tk._schedule_today() == D(2026, 11, 13)
+            assert tk.datetime.date.today() != D(2026, 11, 13)   # plain date.today() would be a day ahead
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
+    print("  OK")
+
+
+def test_schedule_file_loads():
+    print("Testing configs/ticker_ohlcv_schedule.json...")
+    import jobs.scheduler as sched
+    s = sched.load_schedule(tk.SCHEDULE_PATH)
+    assert s.run_time == datetime.time(14, 30) and str(s.tz) == "America/Los_Angeles", s
+    assert s.weekdays_only is True and s.catch_up_until == datetime.time(23, 0), s
+    assert tk.SCHEDULE_PATH == ROOT / "configs" / "ticker_ohlcv_schedule.json", tk.SCHEDULE_PATH
     print("  OK")
 
 

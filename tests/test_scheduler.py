@@ -11,6 +11,8 @@ import datetime
 import json
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -382,6 +384,8 @@ def test_start_scheduler_starts_one_daemon_thread():
     def good_job(payload):
         return {"status": "ok"}
 
+    good_job.__module__ = "jobs.good_job"  # the thread is named after the job's module
+
     good = {"time": "06:30", "timezone": "America/Los_Angeles"}
     with tempfile.TemporaryDirectory() as tmp, \
             mock.patch.object(sched.threading, "Thread", FakeThread), \
@@ -390,13 +394,77 @@ def test_start_scheduler_starts_one_daemon_thread():
         path.write_text(json.dumps(good))
         scheduler = sched.start_scheduler(good_job, path)
         assert isinstance(scheduler, sched.Scheduler)
-        assert [(s[1], s[2]) for s in started] == [("blink-scheduler", True)], started
+        assert [(s[1], s[2]) for s in started] == [("blink-scheduler-good_job", True)], started
         # The server only shows warnings by default, so the start must reach the log.
         assert any("06:30" in str(c) for c in log.call_args_list), log.call_args_list
         assert sched.start_scheduler(good_job, Path(tmp) / "missing.json") is None
         path.write_text(json.dumps({**good, "time": "25:99"}))
         _raises(ValueError, sched.start_scheduler, good_job, path)
         assert len(started) == 1
+    print("  OK")
+
+
+def test_two_schedulers_share_one_state_file_without_losing_entries():
+    print("Testing two schedulers on one state file...")
+    real = sched.write_atomic
+
+    def slow(path, text):
+        time.sleep(0.05)   # widens the read-modify-write window
+        real(path, text)
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sched, "write_log"):
+        state = Path(tmp) / "scheduler.json"
+        a = sched.Scheduler(lambda p: {"status": "ok"}, make_schedule(), name="job_a", state_path=state)
+        b = sched.Scheduler(lambda p: {"status": "ok"}, make_schedule(), name="job_b", state_path=state)
+        errors = []
+
+        def record(scheduler, day):
+            try:
+                scheduler._record_run(day)
+            except BaseException as exc:  # reported below, not lost in the thread
+                errors.append(exc)
+
+        with mock.patch.object(sched, "write_atomic", side_effect=slow):
+            threads = [threading.Thread(target=record, args=(a, datetime.date(2026, 11, 2))),
+                       threading.Thread(target=record, args=(b, datetime.date(2026, 11, 3)))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        assert not errors, errors
+        assert json.loads(state.read_text()) == {"job_a": "2026-11-02", "job_b": "2026-11-03"}, state.read_text()
+    print("  OK")
+
+
+def test_start_scheduler_twice_starts_two_distinctly_named_threads():
+    print("Testing start_scheduler for two jobs...")
+    started = []
+
+    class FakeThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            started.append(name)
+
+        def start(self):
+            pass
+
+    def job_one(payload):
+        return {"status": "ok"}
+
+    def job_two(payload):
+        return {"status": "ok"}
+
+    job_one.__module__, job_two.__module__ = "jobs.job_one", "jobs.job_two"  # the job's name comes from its module
+
+    good = {"time": "06:30", "timezone": "America/Los_Angeles"}
+    with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(sched.threading, "Thread", FakeThread), mock.patch.object(sched, "write_log"):
+        one, two = Path(tmp) / "one.json", Path(tmp) / "two.json"
+        one.write_text(json.dumps(good))
+        two.write_text(json.dumps({**good, "time": "14:30"}))
+        sched.start_scheduler(job_one, one)
+        sched.start_scheduler(job_two, two)
+    assert len(started) == 2 and len(set(started)) == 2, started
+    assert started == ["blink-scheduler-job_one", "blink-scheduler-job_two"], started
     print("  OK")
 
 
