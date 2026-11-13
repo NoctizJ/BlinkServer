@@ -143,6 +143,18 @@
       "module": "jobs.qqqholdings_job",
       "function": "diff",
       "require_secret": true
+    },
+    {
+      "path": "/webhook/ticker/ohlcv/fetch",
+      "module": "jobs.ticker_ohlcv",
+      "function": "run",
+      "require_secret": true
+    },
+    {
+      "path": "/webhook/ticker/ohlcv/repair",
+      "module": "jobs.ticker_ohlcv_repair",
+      "function": "run",
+      "require_secret": true
     }
   ]
 }

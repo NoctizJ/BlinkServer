@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import jobs.qqqholdings_diff as qd
 import jobs.qqqholdings_fetch as qf
 import jobs.qqqholdings_job as qj
+import jobs.qqqholdings_store as qs
 
 
 def _h(name, weight, shares=0.0):
@@ -325,7 +326,7 @@ class temp_stock:
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self._tmp.name) / "stock"
         self._patches = [
-            mock.patch.object(qj, "STOCK_DIR", self.dir),
+            mock.patch.object(qs, "STOCK_DIR", self.dir),
             mock.patch.object(qj, "write_log"),
             # Every run is isolated from phone notifications: a test that reached the real
             # notify_changes would send a real alert through Home Assistant.
@@ -442,7 +443,7 @@ def test_fetch_failure_writes_nothing_and_reports_an_error():
 def test_failed_snapshot_write_is_retried_next_run():
     """The snapshot is written last, so a crash before it leaves no phantom 'done' marker."""
     print("Testing crash safety...")
-    real = qj._write_atomic
+    real = qs.write_atomic
 
     def flaky(path, text):
         if path.name == "qqqholdings_2026-10-29.json":
@@ -450,10 +451,10 @@ def test_failed_snapshot_write_is_retried_next_run():
         real(path, text)
 
     with temp_stock(), _fetch_returns("2026-10-29", DAY1):
-        with mock.patch.object(qj, "_write_atomic", side_effect=flaky):
+        with mock.patch.object(qs, "write_atomic", side_effect=flaky):
             res = qj.run({})
         assert res["status"] == "error" and "disk full" in res["message"], res
-        assert qj._dates(qj.SNAPSHOT_RE) == []
+        assert qs.snapshot_dates() == []
         res = qj.run({})
         assert res["status"] == "ok" and res["baseline"] is True, res
     print("  OK")
@@ -463,6 +464,7 @@ DAY3 = dict(DAY2, NVDA=_h("NVIDIA Corp", 9.50, 100.0), ZED=_h("Zed Co", 0.30, 1.
 
 BAD_DATES = ("../state/presence", "2026-10-3", "latest", "2026-10-30/../..", "٢٠٢٦-١٠-٣٠")
 DAMAGED_SNAPSHOTS = ("{oops", "{}", "[1]")
+BAD_THRESHOLDS = ("nan", "inf", "-inf", "-1", -0.5, True, "abc", None, [1])
 
 
 def _save_days(*days):
@@ -632,7 +634,7 @@ def test_diff_threshold_hides_small_moves_and_is_validated():
         assert res["status"] == "ok" and res["report"]["changed"] == [], res
         assert res["report"]["threshold"] == 0.1, res
         assert "No changes." in res["message"], res["message"]
-        for bad in ("nan", "inf", "-inf", "-1", -0.5, True, "abc", None, [1]):
+        for bad in BAD_THRESHOLDS:
             res = qj.diff({"threshold": bad})
             assert res["status"] == "error" and "threshold" in res["message"], (bad, res)
         assert qj.diff({"threshold": "0"})["status"] == "ok"
@@ -665,7 +667,7 @@ def test_diff_of_a_date_with_itself_has_no_changes():
 def test_concurrent_runs_write_once_and_neither_fails():
     """The scheduler and a manual webhook call can race: one writes, the others see 'no new data'."""
     print("Testing concurrent runs...")
-    real = qj._write_atomic
+    real = qs.write_atomic
 
     def slow(path, text):
         time.sleep(0.05)
@@ -673,7 +675,7 @@ def test_concurrent_runs_write_once_and_neither_fails():
 
     results = []
     with temp_stock() as stock, _fetch_returns("2026-10-29", DAY1):
-        with mock.patch.object(qj, "_write_atomic", side_effect=slow):
+        with mock.patch.object(qs, "write_atomic", side_effect=slow):
             threads = [threading.Thread(target=lambda: results.append(qj.run({})))
                        for _ in range(3)]
             for thread in threads:
@@ -687,7 +689,7 @@ def test_concurrent_runs_write_once_and_neither_fails():
 
 def test_unreadable_previous_snapshot_is_reported_not_raised():
     print("Testing a corrupt previous snapshot...")
-    for damage in ("{not json", "{}", "[1]"):
+    for damage in DAMAGED_SNAPSHOTS:
         with temp_stock() as stock:
             with _fetch_returns("2026-10-29", DAY1):
                 qj.run({})
@@ -703,7 +705,7 @@ def test_bad_thresholds_are_rejected_before_anything_is_fetched():
     """A NaN or negative threshold would give an empty-looking report that then counts as done."""
     print("Testing threshold validation...")
     with temp_stock() as stock, _fetch_returns("2026-10-29", DAY1) as fetch:
-        for bad in ("nan", "inf", "-inf", "-1", -0.5, True, "abc", None, [1]):
+        for bad in BAD_THRESHOLDS:
             res = qj.run({"threshold": bad})
             assert res["status"] == "error" and "threshold" in res["message"], (bad, res)
         assert not fetch.called and stock.files() == []
@@ -790,13 +792,13 @@ def test_added_and_removed_tickers_notify_once_after_the_save():
 
     def check(report):
         # At call time the snapshot is saved and the run lock is free.
-        seen["snapshot"] = (qj.STOCK_DIR / "qqqholdings_2026-10-30.json").exists()
+        seen["snapshot"] = (qs.STOCK_DIR / "qqqholdings_2026-10-30.json").exists()
         seen["locked"] = qj._RUN_LOCK.locked()
         return {"status": "success", "message": "sent"}
 
     with temp_stock() as stock:
         stock.notify.side_effect = check
-        res = _two_days_with_side_effect(stock)
+        res = _two_days(stock)
         assert res["status"] == "ok", res
         assert stock.notify.call_count == 1, stock.notify.call_args_list
         report = stock.notify.call_args.args[0]
@@ -806,14 +808,6 @@ def test_added_and_removed_tickers_notify_once_after_the_save():
         assert res["notification"] == {"status": "success", "message": "sent"}, res
         assert seen == {"snapshot": True, "locked": False}, seen
     print("  OK")
-
-
-def _two_days_with_side_effect(stock):
-    with _fetch_returns("2026-10-29", DAY1):
-        qj.run({})
-    stock.notify.reset_mock()  # keeps side_effect
-    with _fetch_returns("2026-10-30", DAY2):
-        return qj.run({})
 
 
 def test_weight_only_change_does_not_notify():
@@ -841,14 +835,14 @@ def test_notify_changes_raising_does_not_fail_the_run():
     print("Testing a raising notifier...")
     with temp_stock() as stock:
         stock.notify.side_effect = RuntimeError("boom")
-        res = _two_days_with_side_effect(stock)
+        res = _two_days(stock)
         assert res["status"] == "ok", res
         assert res["notification"]["status"] == "error", res
         assert "boom" in res["notification"]["message"], res
         assert stock.log.call_count >= 1
         assert any("notification error" in str(c) for c in stock.log.call_args_list), \
             stock.log.call_args_list
-        assert (qj.STOCK_DIR / "qqqholdings_report_2026-10-30.json").exists()
+        assert (qs.STOCK_DIR / "qqqholdings_report_2026-10-30.json").exists()
     print("  OK")
 
 
