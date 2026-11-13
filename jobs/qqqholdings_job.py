@@ -15,6 +15,10 @@ weight of each remaining ticker moved::
     {}                       # the normal call
     {"threshold": 0.05}      # ignore weight moves under 0.05 percentage points
 
+When a run finds new data in which a ticker was added or removed, it also sends a phone
+notification (best effort; see jobs/qqqholdings_notify.py), reported as ``notification``
+in the result.
+
 ``read`` returns the holdings of one snapshot, largest weight first, each with its rank::
 
     {}                        # the newest snapshot
@@ -49,11 +53,12 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from jobs.log_engine import log as write_log
 from jobs.qqqholdings_diff import DEFAULT_THRESHOLD, diff_holdings
 from jobs.qqqholdings_fetch import HoldingsFetchError, fetch_holdings
+from jobs.qqqholdings_notify import notify_changes
 
 logger = logging.getLogger(__name__)
 
@@ -201,15 +206,19 @@ def _make_report(as_of: str, previous: Optional[str], holdings: Dict[str, dict],
     return report
 
 
-def _store_report(as_of: str, holdings: Dict[str, dict], threshold: float) -> dict:
-    """Diff against the latest earlier snapshot and write the report and snapshot."""
+def _store_report(as_of: str, holdings: Dict[str, dict],
+                  threshold: float) -> Tuple[dict, Optional[dict]]:
+    """Diff against the latest earlier snapshot and write the report and snapshot.
+
+    Returns ``(result, report)``: ``report`` is the saved report dict, or None when
+    nothing was saved (``no_new_data`` or an error)."""
     dates = _dates(SNAPSHOT_RE)
     if dates and as_of <= dates[-1]:
         # The same date again (a market holiday, or Invesco has not published yet), or an
         # older one: either way there is nothing new to report.
         _log(f"QQQ holdings: no new data (fetched {as_of}, latest saved {dates[-1]})")
-        return {"status": "no_new_data", "as_of": as_of,
-                "message": f"No new data: the latest holdings are still as of {dates[-1]}"}
+        return ({"status": "no_new_data", "as_of": as_of,
+                 "message": f"No new data: the latest holdings are still as of {dates[-1]}"}, None)
 
     previous = dates[-1] if dates else None
     try:
@@ -225,7 +234,7 @@ def _store_report(as_of: str, holdings: Dict[str, dict], threshold: float) -> di
                                  ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         _log(f"QQQ holdings {as_of}: could not save the report: {exc}")
-        return {"status": "error", "message": f"could not save the QQQ holdings report: {exc}"}
+        return {"status": "error", "message": f"could not save the QQQ holdings report: {exc}"}, None
 
     _log(f"QQQ holdings {as_of}: baseline of {len(holdings)} saved" if report["baseline"] else
          f"QQQ holdings {as_of}: +{len(report['added'])} "
@@ -239,7 +248,17 @@ def _store_report(as_of: str, holdings: Dict[str, dict], threshold: float) -> di
         "removed": len(report["removed"]),
         "changed": len(report["changed"]),
         "message": text,
-    }
+    }, report
+
+
+def _notify(report: dict) -> dict:
+    """Tell the phone which tickers were added or removed; best effort, the outcome is logged."""
+    try:
+        result = notify_changes(report)
+    except Exception as exc:  # notify_changes should not raise; a bug in it must not fail a saved run
+        result = {"status": "error", "message": str(exc)}
+    _log(f"QQQ holdings {report['as_of']}: notification {result.get('status')}: {result.get('message')}")
+    return {"status": result.get("status"), "message": result.get("message")}
 
 
 def run(payload: Optional[dict] = None) -> dict:
@@ -256,7 +275,12 @@ def run(payload: Optional[dict] = None) -> dict:
         return {"status": "error", "message": str(exc)}
 
     with _RUN_LOCK:
-        return _store_report(as_of, holdings, threshold)
+        result, report = _store_report(as_of, holdings, threshold)
+    # Outside the lock: Home Assistant can take 30 s per device to time out, and the report
+    # and snapshot are already saved, so nothing here can block or undo them.
+    if report is not None and not report["baseline"] and (report["added"] or report["removed"]):
+        result["notification"] = _notify(report)
+    return result
 
 
 def read(payload: Optional[dict] = None) -> dict:

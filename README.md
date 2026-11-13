@@ -147,8 +147,9 @@ individual events:
 | `home_presence` | `leaving_home`, `arriving_home` | `/webhook/notify/leaving`, `/webhook/notify/arriving` |
 | `blink_arm_status` | `blink_arm`, `blink_disarm` | `/webhook/blink/arm`, `/webhook/blink/disarm` |
 | `location_update` | `location_log` | `/webhook/location/log` |
+| `holdings_change` | `qqqholdings_change` | the daily QQQ holdings run (the 06:30 scheduler, `/webhook/qqqholdings/run`) |
 
-Those three cover every notification this server sends.
+Those four cover every notification this server sends.
 
 **This is a file you edit on the server.** Deliberately not controllable per
 request and not exposed over HTTP — unlike the switches in
@@ -445,6 +446,22 @@ curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
 curl -X POST http://localhost:5050/webhook/qqqholdings/diff \
   -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
   -d '{"first_date": "2026-10-28", "second_date": "2026-10-30", "threshold": 0.05}'
+```
+
+**Phone alert.** When a run finds new data in which a ticker was added to or removed
+from the fund, it sends a notification to the notify devices (not for weight-only
+changes or the first baseline). Opt a device out with `"disable": ["holdings_change"]`
+(see [Notification devices](#notification-devices)); turn all phone notifications off
+with the `notify_phone` job switch. The text can be overridden under
+`qqqholdings_change` in `configs/notify_config.json` (`title`, `message`; placeholders
+`{as_of}`, `{previous_as_of}`, `{added_count}`, `{removed_count}`, `{changes}`).
+It is best effort: a failure is logged and shown as `notification` in the run result,
+and is never retried.
+
+Try it (this SENDS A REAL SAMPLE ALERT to your phone):
+
+```bash
+python3 -c "from jobs.qqqholdings_notify import notify_changes; print(notify_changes({'as_of': '2026-11-02', 'previous_as_of': '2026-10-30', 'added': [{'ticker': 'ZZZZ', 'name': 'Example New Co', 'weight': 0.42}], 'removed': []}))"
 ```
 
 `read` lists every holding of one snapshot with its rank, ticker, name, weight and
