@@ -40,6 +40,9 @@ server code.
 - **QQQ holdings report** — every weekday at 6:30 AM Pacific the server downloads the
   QQQ holdings, compares them with the previous snapshot and saves what was added,
   removed and re-weighted — see [QQQ holdings](#qqq-holdings)
+- **OHLCV price history** — fetch daily open/high/low/close/volume for any tickers (or every
+  ticker in the newest QQQ holdings list) from the command line or a webhook, kept as one
+  JSON file per ticker and merged by date — see [OHLCV history](#ohlcv-history)
 
 ## Installation
 
@@ -414,8 +417,8 @@ The report lists the tickers **added**, the tickers **removed**, and the **weigh
 changes** (in percentage points) of tickers that stayed, biggest move first. Moves
 under 0.01 pp are ignored; pass `{"threshold": 0.05}` to `run` to change that.
 
-Files are written to `stock/` (not committed), named by the as-of date inside
-Invesco's file:
+Files are written to `stock/qqqholdings/` (not committed), named by the as-of date
+inside Invesco's file:
 
 | File | Contents |
 | ---- | -------- |
@@ -427,6 +430,8 @@ Invesco's file:
 If Invesco's as-of date has not moved (a market holiday, or the file is not
 published yet) the run writes nothing and reports `no_new_data`. The first run only
 saves a baseline.
+
+Upgrading from a version that kept these files directly in `stock/`? Move them once: `mkdir -p stock/qqqholdings && mv stock/qqqholdings_* stock/qqqholdings/`.
 
 ```bash
 # Run it now (the same thing the scheduler does)
@@ -466,11 +471,10 @@ python3 -c "from jobs.qqqholdings_notify import notify_changes; print(notify_cha
 
 `read` lists every holding of one snapshot with its rank, ticker, name, weight and
 shares. `diff` computes the report from the saved snapshots, so it works for any two
-saved dates; give both `first_date` and `second_date` or neither. `run` still saves
-that day's report under `stock/` (the table above).
+saved dates; give both `first_date` and `second_date` or neither.
 
 Turn it off with `POST /jobs/qqqholdings_job/disable` (send the same `X-Webhook-Secret`
-header as above): that stops both webhooks and the scheduled run. A job that is switched
+header as above): that stops the run, read and diff webhooks and the scheduled run. A job that is switched
 off at its slot is skipped, not retried; after switching it back on, restart the server
 before 12:00 Pacific to make up the run.
 
@@ -483,6 +487,68 @@ slot is skipped and the next run is the next weekday. Run history is in
 A mistake in `configs/schedule.json` stops the server from
 starting (the traceback ends with a message saying what is wrong) instead of failing
 at 6:30.
+
+## OHLCV history
+
+Fetches daily price history (open, high, low, close, volume) from Yahoo Finance and keeps
+one JSON file per ticker. It is a command-line tool and a webhook; both take a date range
+and a list of tickers.
+
+```bash
+# From the repo root
+python3 -m jobs.ticker_ohlcv 30d AAPL,GOOGL
+python3 -m jobs.ticker_ohlcv 2026-01-01..2026-03-31 CurrentQQQ
+
+# The same as a webhook (the secret is required; query-string parameters also work)
+curl -X POST http://localhost:5050/webhook/ticker/ohlcv/fetch \
+  -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
+  -d '{"range": "30d", "tickers": "CurrentQQQ"}'
+
+curl -X POST http://localhost:5050/webhook/ticker/ohlcv/fetch \
+  -H "X-Webhook-Secret: $SECRET" -H "Content-Type: application/json" \
+  -d '{"range": "2026-01-01..2026-03-31", "tickers": ["AAPL", "GOOGL"]}'
+```
+
+**range**: `30d` (or just `30`) is from 30 days ago through today; `START..END` is those two
+dates, both included; `START..` is START through today. Dates are strictly `YYYY-MM-DD`.
+
+**tickers**: a list such as `AAPL,GOOGL`, `AAPL GOOGL`, `[AAPL, GOOGL]` or a JSON list
+(case does not matter, duplicates are dropped), or `CurrentQQQ` (any case) for every ticker
+in the newest saved QQQ holdings snapshot, largest weight first. `CurrentQQQ` needs at least
+one saved snapshot (see [QQQ holdings](#qqq-holdings)).
+
+Each ticker is saved to `stock/ohlcv/<SYMBOL>.json` (not committed), a list sorted by date:
+
+```json
+[
+  {"date": "2026-11-10", "open": 227.5, "high": 229.9, "low": 226.8, "close": 229.1, "volume": 41230000},
+  {"date": "2026-11-11", "open": 229.0, "high": 231.2, "low": 228.4, "close": 230.7, "volume": 38870000}
+]
+```
+
+The prices are Yahoo's daily bars
+with `auto_adjust=False`, so they are not adjusted for dividends; a day with a missing price
+is skipped.
+
+**Merge by date.** If a ticker already has a file, the new bars are merged into it: new days
+are added, days fetched again are refreshed, nothing is dropped. A short fetch therefore
+never loses earlier history, and running the same fetch twice is safe.
+
+**Failures are per ticker.** An unknown symbol, a Yahoo error (a network failure, a rate
+limit) or a damaged file fails that ticker only, with the reason in its result; the others are still fetched and saved. A damaged file is left exactly as it
+was. The result `status` is `ok` (every ticker saved), `partial` (some failed) or `error`
+(none saved, or the range or tickers were not valid); `saved` and `failed` list each ticker,
+and `message` has one line per ticker in the order requested. The command line exits 0 only
+when everything was saved. Re-running is safe, so failed tickers can simply be fetched again.
+
+It needs `yfinance` (`pip install yfinance`, listed in `requirements.txt`); the server and
+every other job run without it, and it is only imported when a fetch starts.
+
+`CurrentQQQ` fetches about 100 tickers one after another, and the webhook call waits for all
+of them before it answers, so give the client a long timeout.
+
+Turn it off with `POST /jobs/ticker_ohlcv/disable` (send the same `X-Webhook-Secret` header
+as above). Messages are in the `ticker_ohlcv` log type.
 
 ## Running
 

@@ -76,12 +76,7 @@ def test_from_config_validates_and_applies_defaults():
     s = sched.Schedule.from_config(base)
     assert s.weekdays_only is True and s.catch_up_until is None, s
     for bad in ({"time": "6.30"}, {"timezone": "Nowhere/Land"}, {"catch_up_until": "noon"}):
-        raw = {**base, **bad}
-        try:
-            sched.Schedule.from_config(raw)
-        except ValueError:
-            continue
-        raise AssertionError(f"expected ValueError for {bad}")
+        _raises(ValueError, sched.Schedule.from_config, {**base, **bad}, label=str(bad))
     print("  OK")
 
 

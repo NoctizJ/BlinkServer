@@ -45,8 +45,6 @@ def diff_holdings(old: Dict[str, Dict[str, Any]],
                 "change": change,
             })
 
-    # Ties (equal weights, equal moves) break by ticker so the report order does
-    # not depend on the order of the input rows.
     added.sort(key=lambda row: (-row["weight"], row["ticker"]))
     removed.sort(key=lambda row: (-row["weight"], row["ticker"]))
     changed.sort(key=lambda row: (-abs(row["change"]), row["ticker"]))

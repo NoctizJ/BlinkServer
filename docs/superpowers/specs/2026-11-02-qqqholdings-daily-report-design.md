@@ -13,7 +13,7 @@ step and out of scope here.
 
 ## Non-goals
 
-- Sending the report anywhere (iMessage, phone notification). The `read` and `diff` webhooks are
+- Sending the report anywhere (iMessage). The `read` and `diff` webhooks are
   the hand-off point for that later step.
 - A market-holiday calendar. The as-of date in Invesco's file covers holidays (see
   Data flow).
@@ -26,9 +26,14 @@ step and out of scope here.
 | `jobs/scheduler.py` | Runs one job daily at HH:MM in a timezone, weekdays only, from a thread that `app.py`'s `__main__` block starts once. Handles retry, catch-up and sleep (see Failure handling). | `configs/schedule.json` |
 | `jobs/qqqholdings_fetch.py` | Downloads QQQ holdings from Invesco and normalizes them to `{ticker: {name, weight, shares}}` plus the file's as-of date. | `requests` |
 | `jobs/qqqholdings_diff.py` | Pure function: old map + new map -> `added`, `removed`, `changed`. No I/O. | nothing |
-| `jobs/qqqholdings_job.py` | Orchestration (fetch, load previous, diff, save, log). Exposes `run` (manual trigger), `read` and `diff` webhooks. | the three above, log engine, switches |
+| `jobs/qqqholdings_job.py` | Orchestration (fetch, load previous, diff, save, log). Exposes `run` (manual trigger), `read` and `diff` webhooks. | fetch, diff, notify, store, log engine |
+| `jobs/qqqholdings_store.py` | On-disk storage under `stock/qqqholdings/`: the file layout, the snapshot-last rule (`save_day` writes the report files first and the snapshot last), and the read API (`snapshot_dates`, `load_snapshot`). The job is its only writer. | `jobs/atomic_write.py` |
+| `jobs/qqqholdings_notify.py` | Builds and sends the added/removed alert (see Phone notification). | `jobs/home_assistant_notify.py`, `jobs/switches.py` |
+| `jobs/atomic_write.py` | Shared crash-safe file write (temp file, then rename). | nothing |
 | `configs/schedule.json` | The schedule: time, timezone, weekdays_only, catch_up_until. | |
 | `tests/test_qqqholdings.py` | Tests for diff, parsing, fetch retry, job flow, idempotence, registration. (Scheduler tests are in `tests/test_scheduler.py`.) | |
+| `tests/test_qqqholdings_notify.py` | Tests for the alert text and sending. | |
+| `tests/test_qqqholdings_store.py` | Tests for the storage: listing snapshots, `save_day` content and write order, a crash before the snapshot, `load_snapshot` failures. | |
 
 The three webhooks are registered in `configs/config.json` like the existing jobs:
 `/webhook/qqqholdings/run`, `/webhook/qqqholdings/read` and `/webhook/qqqholdings/diff`,
@@ -41,7 +46,7 @@ all with `require_secret: true`.
 3. The as-of date comes from Invesco's file, not from the clock. If it equals the
    latest snapshot's date (market holiday, or Invesco has not published yet), the
    run logs "no new data" and writes nothing.
-4. Otherwise the job loads the previous snapshot, the latest file in `stock/` by
+4. Otherwise the job loads the previous snapshot, the latest file in `stock/qqqholdings/` by
    as-of date. "Yesterday" therefore means the previous snapshot on disk: Monday's
    run compares against Friday.
 5. With no previous snapshot (first ever run) it saves a baseline and no diff.
@@ -50,14 +55,19 @@ all with `require_secret: true`.
 Weight changes are in percentage points. A change smaller than a configurable
 threshold (default 0.01 pp) is ignored as noise.
 
-### Storage (`stock/`, at the BlinkServer root next to `state/`)
+### Storage (`stock/qqqholdings/`, under `stock/` at the BlinkServer root next to `state/`)
 
-- `stock/qqqholdings_<asof>.json` — the day's snapshot
-- `stock/qqqholdings_report_<asof>.json` — structured report
-- `stock/qqqholdings_report_<asof>.txt` — the same report as readable text
+- `stock/qqqholdings/qqqholdings_<asof>.json` — the day's snapshot
+- `stock/qqqholdings/qqqholdings_report_<asof>.json` — structured report
+- `stock/qqqholdings/qqqholdings_report_<asof>.txt` — the same report as readable text
+
+`jobs/qqqholdings_store.py` owns this layout; the job saves a day with one call,
+`save_day`, and reads back through `snapshot_dates` and `load_snapshot`.
 
 All writes are atomic (temp file, then rename), so a crash never leaves a partial
-snapshot that the next run would diff against.
+snapshot that the next run would diff against. `save_day` writes the snapshot last:
+its existence is what marks a date as done, so a crash before it means the next run
+redoes the work.
 
 ### Read and diff webhooks
 
@@ -82,13 +92,10 @@ either webhook unchanged.
 
 - Fetch failures retry 3 attempts with backoff, then log through the existing log
   engine. No partial snapshot is written.
-- Startup catch-up: if the server starts after 6:30 on a weekday, before a cutoff of
-  12:00, and no run has happened for today, it runs once.
-- Retry: a run that fails (Invesco unreachable, an error result) is tried again every
-  15 minutes until it succeeds or the 12:00 cutoff passes. Added during implementation
-  review: without it, a few minutes of Invesco downtime at 6:30 lost the whole day.
-- Sleep: if the Mac slept through 6:30, the missed run happens on wake only if that is
-  still before 12:00 on a weekday; otherwise the slot is skipped.
+- Startup catch-up, retry and sleep: the rules (a window until 12:00) are in the docstring
+  of `jobs/scheduler.py`. They were added during implementation review: without them a few
+  minutes of Invesco downtime at 6:30, a late server start or a sleeping Mac lost the
+  whole day.
 - A job that is switched off at its slot is skipped for the day (not retried).
 - On/off switch in `configs/job_switches.json`, like the other jobs.
 
@@ -118,13 +125,10 @@ either webhook unchanged.
 
 ## Testing
 
-Same style as the existing `tests/`:
-
-- Diff: added, removed, weight up, weight down, below threshold, identical.
-- Parsing, against a saved sample response.
-- Scheduler next-run calculation with an injected clock: weekend skip, already past
-  6:30, timezone.
-- Idempotence: a second run with the same as-of date writes nothing.
+`tests/test_qqqholdings.py`, `tests/test_qqqholdings_store.py`, `tests/test_qqqholdings_notify.py` and `tests/test_scheduler.py`
+(plain scripts: `python3 tests/<file>.py`). They cover the diff (added, removed, weight moves,
+threshold), parsing against a sample response, fetch retry, the job flow and its idempotence,
+the notification, and the scheduler's next-run, catch-up and retry rules with an injected clock.
 
 ## Open items
 

@@ -41,12 +41,12 @@ import dataclasses
 import datetime
 import json
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
+from jobs.atomic_write import write_atomic
 from jobs.log_engine import log as write_log
 from jobs.switches import master_enabled
 
@@ -163,15 +163,7 @@ class Scheduler:
     def _record_run(self, day: datetime.date) -> None:
         runs = self._last_runs()
         runs[self.name] = day.isoformat()
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_path.with_name(
-            f".{self.state_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        try:
-            tmp.write_text(json.dumps(runs, indent=2), encoding="utf-8")
-            os.replace(tmp, self.state_path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        write_atomic(self.state_path, json.dumps(runs, indent=2))
 
     # -- running -------------------------------------------------------------
     def _fire(self, now: datetime.datetime) -> Optional[bool]:

@@ -30,11 +30,7 @@ in the result.
     {"first_date": "2026-10-28", "second_date": "2026-10-30"}   # from first to second
     {"threshold": 0.05}       # optional: ignore weight moves under 0.05 percentage points
 
-Files in ``stock/`` (the date is the as-of date inside Invesco's file):
-
-    qqqholdings_<date>.json          the day's snapshot
-    qqqholdings_report_<date>.json   the structured report
-    qqqholdings_report_<date>.txt    the same report as text
+The files this job saves, and how they are read back, are in ``jobs/qqqholdings_store.py``.
 
 "Yesterday" means the latest earlier snapshot on disk, so Monday's run compares
 against Friday. If the as-of date matches a snapshot we already have (a market
@@ -46,15 +42,13 @@ raised, so a webhook caller gets JSON and the scheduler can tell a failed run
 from a finished one.
 """
 
-import json
 import logging
 import math
-import os
 import re
 import threading
-from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from jobs import qqqholdings_store as store
 from jobs.log_engine import log as write_log
 from jobs.qqqholdings_diff import DEFAULT_THRESHOLD, diff_holdings
 from jobs.qqqholdings_fetch import HoldingsFetchError, fetch_holdings
@@ -62,51 +56,15 @@ from jobs.qqqholdings_notify import notify_changes
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-STOCK_DIR = REPO_ROOT / "stock"
-
 LOG_TYPE = "qqqholdings"
-SNAPSHOT_RE = re.compile(r"^qqqholdings_([0-9]{4}-[0-9]{2}-[0-9]{2})\.json$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+# A snapshot that cannot be used: a missing or unreadable file (OSError), bad JSON (ValueError),
+# `{}` with no "holdings" (KeyError) or `[1]` (TypeError).
+_BAD_SNAPSHOT = (OSError, ValueError, KeyError, TypeError)
 
 # A scheduled run and a manual webhook call can overlap; only one may write at a time.
 _RUN_LOCK = threading.Lock()
-
-
-def _snapshot_path(as_of: str) -> Path:
-    return STOCK_DIR / f"qqqholdings_{as_of}.json"
-
-
-def _report_json_path(as_of: str) -> Path:
-    return STOCK_DIR / f"qqqholdings_report_{as_of}.json"
-
-
-def _report_text_path(as_of: str) -> Path:
-    return STOCK_DIR / f"qqqholdings_report_{as_of}.txt"
-
-
-def _write_atomic(path: Path, text: str) -> None:
-    """Write via a uniquely named temp file and rename, so a crash never leaves half a file
-    and two writers never share a temp file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def _dates(pattern: re.Pattern) -> List[str]:
-    """Sorted as-of dates of the files in stock/ that match ``pattern``."""
-    if not STOCK_DIR.is_dir():
-        return []
-    return sorted(m.group(1) for p in STOCK_DIR.iterdir() if (m := pattern.match(p.name)))
-
-
-def _load_snapshot(as_of: str) -> Dict[str, dict]:
-    return json.loads(_snapshot_path(as_of).read_text(encoding="utf-8"))["holdings"]
 
 
 def _section(title: str, rows: List[dict], line: Callable[[dict], str]) -> List[str]:
@@ -179,15 +137,16 @@ def _log(text: str) -> None:
         logger.exception("could not write the qqqholdings log entry")
 
 
-def _valid_threshold(value) -> Optional[float]:
-    """The threshold as a float, or None unless it is a finite number, zero or more."""
-    if isinstance(value, bool):
-        return None
+def _threshold_param(payload: dict) -> float:
+    """The threshold from the payload as a float; ValueError unless it is a finite number, zero or more."""
+    value = payload.get("threshold", DEFAULT_THRESHOLD)
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) and number >= 0 else None
+        number = math.nan
+    if isinstance(value, bool) or not (math.isfinite(number) and number >= 0):
+        raise ValueError("threshold must be a number, zero or more")
+    return number
 
 
 def _make_report(as_of: str, previous: Optional[str], holdings: Dict[str, dict],
@@ -212,7 +171,7 @@ def _store_report(as_of: str, holdings: Dict[str, dict],
 
     Returns ``(result, report)``: ``report`` is the saved report dict, or None when
     nothing was saved (``no_new_data`` or an error)."""
-    dates = _dates(SNAPSHOT_RE)
+    dates = store.snapshot_dates()
     if dates and as_of <= dates[-1]:
         # The same date again (a market holiday, or Invesco has not published yet), or an
         # older one: either way there is nothing new to report.
@@ -222,17 +181,11 @@ def _store_report(as_of: str, holdings: Dict[str, dict],
 
     previous = dates[-1] if dates else None
     try:
-        old = _load_snapshot(previous) if previous else None
+        old = store.load_snapshot(previous) if previous else None
         report = _make_report(as_of, previous, holdings, old, threshold)
         text = format_report(report)
-        _write_atomic(_report_json_path(as_of), json.dumps(report, indent=2, ensure_ascii=False))
-        _write_atomic(_report_text_path(as_of), text + "\n")
-        # The snapshot goes last: its existence is what marks this date as done, so a
-        # crash before this line means the next run simply does the work again.
-        _write_atomic(_snapshot_path(as_of),
-                      json.dumps({"as_of": as_of, "holdings": holdings}, indent=2,
-                                 ensure_ascii=False))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        store.save_day(as_of, holdings, report, text)
+    except _BAD_SNAPSHOT as exc:
         _log(f"QQQ holdings {as_of}: could not save the report: {exc}")
         return {"status": "error", "message": f"could not save the QQQ holdings report: {exc}"}, None
 
@@ -264,9 +217,10 @@ def _notify(report: dict) -> dict:
 def run(payload: Optional[dict] = None) -> dict:
     """Fetch the holdings, diff against the previous snapshot, save the report."""
     payload = payload or {}
-    threshold = _valid_threshold(payload.get("threshold", DEFAULT_THRESHOLD))
-    if threshold is None:
-        return {"status": "error", "message": "threshold must be a number, zero or more"}
+    try:
+        threshold = _threshold_param(payload)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
 
     try:
         as_of, holdings = fetch_holdings()
@@ -278,7 +232,7 @@ def run(payload: Optional[dict] = None) -> dict:
         result, report = _store_report(as_of, holdings, threshold)
     # Outside the lock: Home Assistant can take 30 s per device to time out, and the report
     # and snapshot are already saved, so nothing here can block or undo them.
-    if report is not None and not report["baseline"] and (report["added"] or report["removed"]):
+    if report is not None and (report["added"] or report["removed"]):
         result["notification"] = _notify(report)
     return result
 
@@ -290,15 +244,15 @@ def read(payload: Optional[dict] = None) -> dict:
         date = _date_param(payload, "date")
     except ValueError as exc:
         return {"status": "error", "message": str(exc)}
-    dates = _dates(SNAPSHOT_RE)
+    dates = store.snapshot_dates()
     date = date or (dates[-1] if dates else None)
-    if date is None or date not in dates:
+    if date not in dates:
         return _not_found(date, dates)
     try:
-        ranked = ranked_holdings(_load_snapshot(date))
+        ranked = ranked_holdings(store.load_snapshot(date))
         total = round(sum(r["weight"] for r in ranked), 4)
         text = format_holdings(date, ranked, total)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except _BAD_SNAPSHOT as exc:
         return {"status": "error", "message": f"could not read the QQQ holdings for {date}: {exc}"}
     return {"status": "ok", "as_of": date, "count": len(ranked), "total_weight": total,
             "holdings": ranked, "message": text}
@@ -307,10 +261,8 @@ def read(payload: Optional[dict] = None) -> dict:
 def diff(payload: Optional[dict] = None) -> dict:
     """Diff two snapshots: the newest against the one before it, or ``first_date`` against ``second_date``."""
     payload = payload or {}
-    threshold = _valid_threshold(payload.get("threshold", DEFAULT_THRESHOLD))
-    if threshold is None:
-        return {"status": "error", "message": "threshold must be a number, zero or more"}
     try:
+        threshold = _threshold_param(payload)
         first, second = _date_param(payload, "first_date"), _date_param(payload, "second_date")
     except ValueError as exc:
         return {"status": "error", "message": str(exc)}
@@ -318,7 +270,7 @@ def diff(payload: Optional[dict] = None) -> dict:
         return {"status": "error",
                 "message": "give both first_date and second_date, or neither "
                            "(neither compares the two newest snapshots)"}
-    dates = _dates(SNAPSHOT_RE)
+    dates = store.snapshot_dates()
     if not first:
         if len(dates) < 2:
             return {"status": "not_found",
@@ -328,8 +280,8 @@ def diff(payload: Optional[dict] = None) -> dict:
         if date not in dates:
             return _not_found(date, dates)
     try:
-        report = _make_report(second, first, _load_snapshot(second), _load_snapshot(first), threshold)
+        report = _make_report(second, first, store.load_snapshot(second), store.load_snapshot(first), threshold)
         text = format_report(report)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except _BAD_SNAPSHOT as exc:
         return {"status": "error", "message": f"could not compare the QQQ holdings: {exc}"}
     return {"status": "ok", "as_of": second, "previous_as_of": first, "report": report, "message": text}

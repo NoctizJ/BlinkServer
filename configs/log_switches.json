@@ -4,7 +4,8 @@
     "blink": true,
     "upload": true,
     "qqqholdings": true,
-    "scheduler": true
+    "scheduler": true,
+    "ticker_ohlcv": true
   },
   "last_modified": "2026-07-11 10:02:45.992201"
 }
